@@ -8,6 +8,7 @@ pub struct Config {
     pub hotkey_vk: u32,
     pub auto_hide: bool,
     pub autostart: bool,
+    pub theme: String, // "light" / "dark" / "system"
     pub win_x: i32,
     pub win_y: i32,
     pub win_cx: i32,
@@ -23,6 +24,7 @@ impl Default for Config {
             hotkey_vk: 0x4E, // 'N'
             auto_hide: true,
             autostart: false,
+            theme: "system".into(),
             win_x: -1, // -1 = 首次居中
             win_y: -1,
             win_cx: 720,
@@ -51,6 +53,7 @@ pub fn load() -> Config {
             "hotkey_vk" => cfg.hotkey_vk = v.parse().unwrap_or(cfg.hotkey_vk),
             "auto_hide" => cfg.auto_hide = v != "0",
             "autostart" => cfg.autostart = v != "0",
+            "theme" => cfg.theme = v.to_string(),
             "win_x" => cfg.win_x = v.parse().unwrap_or(cfg.win_x),
             "win_y" => cfg.win_y = v.parse().unwrap_or(cfg.win_y),
             "win_cx" => cfg.win_cx = v.parse().unwrap_or(cfg.win_cx),
@@ -65,11 +68,12 @@ pub fn load() -> Config {
 
 pub fn save(cfg: &Config) {
     let text = format!(
-        "hotkey_mods={}\nhotkey_vk={}\nauto_hide={}\nautostart={}\nwin_x={}\nwin_y={}\nwin_cx={}\nwin_cy={}\nlast_tab={}\nlast_note={}\n",
+        "hotkey_mods={}\nhotkey_vk={}\nauto_hide={}\nautostart={}\ntheme={}\nwin_x={}\nwin_y={}\nwin_cx={}\nwin_cy={}\nlast_tab={}\nlast_note={}\n",
         cfg.hotkey_mods,
         cfg.hotkey_vk,
         cfg.auto_hide as u8,
         cfg.autostart as u8,
+        cfg.theme,
         cfg.win_x,
         cfg.win_y,
         cfg.win_cx,

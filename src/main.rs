@@ -3,7 +3,9 @@
 mod config;
 mod hotkey;
 mod notes;
+mod rename;
 mod settings;
+mod theme;
 mod todos;
 mod tray;
 mod util;
@@ -22,6 +24,7 @@ use crate::util::wide;
 const MUTEX_NAME: &str = "MiniNotes_SingleInstance_v1";
 
 fn main() {
+    
     unsafe {
         // 单实例：已有实例则唤起它并退出
         let _mutex = CreateMutexW(std::ptr::null(), 0, wide(MUTEX_NAME).as_ptr());
@@ -35,11 +38,12 @@ fn main() {
         // RichEdit 4.1 (msftedit.dll)
         LoadLibraryW(wide("MSFTEDIT.DLL").as_ptr());
         window::init_common_controls();
+        window::init_gdiplus();
 
         let cfg = config::load();
         let hicon = app_icon();
         let hwnd = window::create(hicon);
-        window::init_app(hwnd, cfg);
+        window::init_app(hwnd, cfg, hicon);
 
         tray::add(hwnd, hicon, "MiniNotes");
 

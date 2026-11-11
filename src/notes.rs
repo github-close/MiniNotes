@@ -1,13 +1,16 @@
 use std::path::PathBuf;
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LRESULT, LPARAM, RECT, WPARAM};
 use windows_sys::Win32::UI::Controls::{
-    LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS, LVM_EDITLABELW, LVM_ENSUREVISIBLE, LVM_GETNEXTITEM,
-    LVM_INSERTITEMW, LVM_SETITEMSTATE, LVIS_SELECTED, LVNI_SELECTED, NMLVDISPINFOW,
+    CDDS_ITEMPREPAINT, CDDS_POSTPAINT, CDDS_PREPAINT, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW,
+    CDRF_NOTIFYPOSTPAINT, LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS,
+    LVM_ENSUREVISIBLE, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMSTATE, LVM_GETNEXTITEM,
+    LVM_INSERTITEMW, LVM_SETITEMSTATE, LVIS_SELECTED, LVNI_SELECTED, NMLVCUSTOMDRAW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, SendMessageW, SetWindowTextW, MB_OKCANCEL};
 
+use crate::theme;
 use crate::util::{get_text, set_text, wide};
 use crate::window::App;
 
@@ -72,6 +75,9 @@ fn is_note_file(name: &str) -> bool {
 fn lv_insert(lv: HWND, idx: i32, text: &str) {
     let mut w = wide(text);
     let mut item: LVITEMW = unsafe { std::mem::zeroed() };
+    // 笔记无图标（待办列表的勾选圈才需要）：不声明图标位，
+    // 行首不预留 24px 图标槽，标题与「＋ 新建」文字对齐同一左缘
+    // （挂载的小图列表仍负责把行高撑到 26px）
     item.mask = LVIF_TEXT;
     item.iItem = idx;
     item.pszText = w.as_mut_ptr();
@@ -92,6 +98,94 @@ fn lv_select(lv: HWND, idx: i32) {
 
 fn lv_selected(lv: HWND) -> i32 {
     unsafe { SendMessageW(lv, LVM_GETNEXTITEM, (-1isize) as usize, LVNI_SELECTED as LPARAM) as i32 }
+}
+
+fn lv_item_rect(lv: HWND, idx: i32) -> RECT {
+    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 }; // left=0 → LVIR_BOUNDS
+    unsafe { SendMessageW(lv, LVM_GETITEMRECT, idx as WPARAM, &mut rc as *mut RECT as LPARAM) };
+    rc
+}
+
+/// 自绘整行：选中淡底 + 标题文字 + 空状态提示
+pub fn on_custom_draw(app: &crate::window::App, nm: &NMLVCUSTOMDRAW) -> LRESULT {
+    use windows_sys::Win32::Graphics::Gdi::{
+        CreateSolidBrush, DeleteObject, DrawTextW, FillRect, SelectObject, SetBkMode, SetTextColor,
+        DT_END_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, TRANSPARENT,
+    };
+    use windows_sys::Win32::UI::Controls::{LVM_GETCOLUMNWIDTH, CDRF_SKIPDEFAULT};
+    unsafe {
+        let lv = nm.nmcd.hdr.hwndFrom;
+        match nm.nmcd.dwDrawStage {
+            CDDS_PREPAINT => {
+                if SendMessageW(lv, LVM_GETITEMCOUNT, 0, 0) == 0 {
+                    CDRF_NOTIFYPOSTPAINT as LRESULT
+                } else {
+                    (CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT) as LRESULT
+                }
+            }
+            CDDS_POSTPAINT => {
+                let p = theme::palette(app.dark);
+                let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(lv, &mut rc);
+                // Explorer 主题会在最右列边缘画一条贯穿整个列表的 1px 装饰竖线，
+                // 延伸到没有内容的空白区，看着像一块凸出的空面板——用背景色盖掉
+                let colw = SendMessageW(lv, LVM_GETCOLUMNWIDTH, 0, 0) as i32;
+                if colw > 0 && colw <= rc.right {
+                    let b = CreateSolidBrush(p.window_bg);
+                    FillRect(
+                        nm.nmcd.hdc,
+                        &RECT { left: colw - 1, top: 0, right: colw, bottom: rc.bottom },
+                        b,
+                    );
+                    DeleteObject(b);
+                }
+                if SendMessageW(lv, LVM_GETITEMCOUNT, 0, 0) == 0 {
+                    crate::util::draw_hint_centered(nm.nmcd.hdc, &rc, "点「＋ 新建」写第一篇笔记", p.text_sec, app.font);
+                }
+                CDRF_DODEFAULT as LRESULT
+            }
+            CDDS_ITEMPREPAINT => {
+                let idx = nm.nmcd.dwItemSpec as usize;
+                let i = nm.nmcd.dwItemSpec as i32;
+                let p = theme::palette(app.dark);
+                let rc = lv_item_rect(lv, i);
+                let selected = SendMessageW(lv, LVM_GETITEMSTATE, i as WPARAM, LVIS_SELECTED as LPARAM) as u32
+                    & LVIS_SELECTED
+                    != 0;
+                if selected {
+                    theme::fill_round(
+                        nm.nmcd.hdc,
+                        RECT { left: rc.left + 2, top: rc.top, right: rc.right - 2, bottom: rc.bottom - 1 },
+                        6.0,
+                        Some(p.accent_tint),
+                        None,
+                    );
+                }
+                // 标题文字（行首无图标槽，左缩进 10 与「＋ 新建」文字对齐）
+                let title = app
+                    .notes
+                    .get(idx)
+                    .map(|m| title_of(&m.filename))
+                    .unwrap_or_default();
+                let mut tr = RECT { left: rc.left + 10, top: rc.top, right: rc.right - 8, bottom: rc.bottom };
+                SelectObject(nm.nmcd.hdc, app.font);
+                SetTextColor(
+                    nm.nmcd.hdc,
+                    if selected { p.accent } else { p.text },
+                );
+                SetBkMode(nm.nmcd.hdc, TRANSPARENT as i32);
+                DrawTextW(
+                    nm.nmcd.hdc,
+                    crate::util::wide(&title).as_ptr(),
+                    -1,
+                    &mut tr,
+                    DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                );
+                CDRF_SKIPDEFAULT as LRESULT
+            }
+            _ => CDRF_DODEFAULT as LRESULT,
+        }
+    }
 }
 
 // ---------- 业务 ----------
@@ -118,6 +212,7 @@ pub fn ensure_first_run() {
 
 /// 重扫目录并重建列表（按修改时间倒序），尽量保持/恢复选中
 pub fn refresh(app: &mut App) {
+    crate::rename::cancel(app);
     app.suppress_notify = true;
     let keep = app
         .cur_note
@@ -170,7 +265,8 @@ pub fn save_current(app: &mut App) {
         return;
     }
     let path = dir().join(&app.notes[idx].filename);
-    let text = get_text(app.editor);
+    // EDIT 控件内部用 CRLF；写盘统一回 LF（跨工具友好）
+    let text = get_text(app.editor).replace("\r\n", "\n");
     let _ = std::fs::write(path, text);
     app.notes[idx].mtime = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -188,6 +284,8 @@ pub fn load_by_index(app: &mut App, idx: usize) {
     app.cur_note = Some(idx);
     let path = dir().join(&app.notes[idx].filename);
     let text = std::fs::read_to_string(path).unwrap_or_default();
+    // 文件是 LF；EDIT 控件只认 CRLF，否则换行丢失
+    let text = text.replace("\r\n", "\n").replace('\n', "\r\n");
     app.suppress_notify = true;
     set_text(app.editor, &text);
     app.suppress_notify = false;
@@ -293,31 +391,23 @@ pub fn delete_selected(app: &mut App) {
 /// 开始重命名（列表选中项）
 pub fn begin_rename(app: &mut App) {
     let idx = lv_selected(app.note_list);
-    if idx >= 0 {
-        unsafe { SendMessageW(app.note_list, LVM_EDITLABELW, idx as WPARAM, 0) };
+    if idx < 0 {
+        return;
     }
+    let idx = idx as usize;
+    if idx >= app.notes.len() {
+        return;
+    }
+    let title = title_of(&app.notes[idx].filename);
+    crate::rename::start(app, crate::rename::Target::Note(idx), &title);
 }
 
-/// 重命名结束（LVN_ENDLABELEDIT）。返回 true = 应用
-pub fn on_end_label_edit(app: &mut App, di: &NMLVDISPINFOW) -> bool {
-    let idx = di.item.iItem as usize;
+/// 应用重命名（自管理重命名编辑框提交时调用）。返回 true = 已改名
+pub fn apply_rename(app: &mut App, idx: usize, new_text: &str) -> bool {
     if idx >= app.notes.len() {
         return false;
     }
-    let ptr = di.item.pszText as *const u16;
-    if ptr.is_null() {
-        return false;
-    }
-    let len = unsafe {
-        let mut n = 0;
-        while *ptr.add(n) != 0 {
-            n += 1;
-        }
-        n
-    };
-    let new_title = sanitize(&crate::util::from_wide(unsafe {
-        std::slice::from_raw_parts(ptr, len)
-    }));
+    let new_title = sanitize(new_text);
     if new_title == title_of(&app.notes[idx].filename) {
         return false;
     }

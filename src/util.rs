@@ -61,6 +61,45 @@ pub fn create_ui_font(strike: bool) -> HFONT {
     }
 }
 
+/// 标题/Tab 用小号半粗字体
+pub fn create_font_title() -> HFONT {
+    let face = wide(UI_FONT_FACE);
+    unsafe {
+        CreateFontW(-13, 0, 0, 0, 600, 0, 0, 0, 0, 0, 0, 5, 0, face.as_ptr())
+    }
+}
+
+/// 字体一行的高度（tmHeight + tmExternalLeading），供布局按行高定位控件
+pub fn font_line_height(hfont: HFONT) -> i32 {
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetDC, GetTextMetricsW, ReleaseDC, SelectObject, TEXTMETRICW,
+    };
+    unsafe {
+        let hdc = GetDC(0);
+        let old = SelectObject(hdc, hfont);
+        let mut tm: TEXTMETRICW = std::mem::zeroed();
+        GetTextMetricsW(hdc, &mut tm);
+        SelectObject(hdc, old);
+        ReleaseDC(0, hdc);
+        (tm.tmHeight + tm.tmExternalLeading) as i32
+    }
+}
+
+/// 在矩形中央绘制次级提示文字（列表空状态）
+pub fn draw_hint_centered(hdc: isize, rc: &windows_sys::Win32::Foundation::RECT, text: &str, color: u32, hfont: isize) {
+    use windows_sys::Win32::Graphics::Gdi::{
+        DrawTextW, SelectObject, SetBkMode, SetTextColor, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
+        TRANSPARENT,
+    };
+    unsafe {
+        SetBkMode(hdc, TRANSPARENT as i32);
+        SetTextColor(hdc, color);
+        SelectObject(hdc, hfont);
+        let mut r = *rc;
+        DrawTextW(hdc, wide(text).as_ptr(), -1, &mut r, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    }
+}
+
 pub fn destroy_font(font: HFONT) {
     if font != 0 {
         unsafe { DeleteObject(font) };

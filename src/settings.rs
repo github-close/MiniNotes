@@ -1,25 +1,30 @@
 use std::cell::RefCell;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{FillRect, InvalidateRect, CreateSolidBrush, DeleteObject};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
     HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
 };
-use windows_sys::Win32::UI::Controls::BST_CHECKED;
+use windows_sys::Win32::UI::Controls::{SetWindowTheme, BST_CHECKED, DRAWITEMSTRUCT, ODS_SELECTED, WM_MOUSELEAVE};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, MOD_ALT, MOD_CONTROL, MOD_SHIFT, VK_CONTROL, VK_LWIN, VK_MENU,
     VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRect, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, GetWindowRect, LoadCursorW, MessageBoxW, RegisterClassW, SetForegroundWindow,
-    SetWindowTextW, ShowWindow, SW_SHOW, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
-    WM_KEYDOWN, WM_SYSKEYDOWN, WS_BORDER, WS_CAPTION, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE, WNDCLASSW, IDC_ARROW,
+    AdjustWindowRect, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_OWNERDRAW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, LoadCursorW, MessageBoxW,
+    RegisterClassW, SendMessageW, SetForegroundWindow, SetWindowTextW, ShowWindow, SW_SHOW,
+    WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORSTATIC, WM_CTLCOLOREDIT, WM_DESTROY,
+    WM_DRAWITEM, WM_ERASEBKGND,
+    BM_CLICK, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_SYSKEYDOWN, WS_GROUP,
+    WS_CAPTION, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WNDCLASSW, IDC_ARROW,
 };
 
+use crate::theme::{self, BtnAlign, BtnKind};
 use crate::util::{self, wide};
 use crate::window::with_app;
 use crate::hotkey;
@@ -33,7 +38,14 @@ const CHK_AUTOSTART: u32 = 4;
 const ST_HINT: u32 = 5;
 const BTN_SAVE: u32 = 6;
 const BTN_CANCEL: u32 = 7;
+const RD_LIGHT: u32 = 8;
+const RD_DARK: u32 = 9;
+const RD_SYSTEM: u32 = 10;
+const ST_HIDE: u32 = 11;
+const ST_AUTO: u32 = 12;
 const SUB_CAPTURE: usize = 10;
+const SUB_SBTN: usize = 11;
+const SS_NOTIFY: u32 = 0x0100; // windows-sys 0.52 缺失
 
 struct SettingsState {
     hwnd: HWND,
@@ -43,6 +55,10 @@ struct SettingsState {
     hk_mods: u32,
     hk_vk: u32,
     font: isize,
+    hover_save: bool,
+    hover_cancel: bool,
+    down_save: bool,
+    down_cancel: bool,
 }
 
 thread_local! {
@@ -150,18 +166,13 @@ pub fn open(owner: HWND) {
         };
         RegisterClassW(&wc);
 
-        // 客户区 356x208，非 resizable 对话框边框
         let style = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU) as u32;
-        let mut rc = RECT { left: 0, top: 0, right: 356, bottom: 208 };
+        let mut rc = RECT { left: 0, top: 0, right: 360, bottom: 252 };
         AdjustWindowRect(&mut rc, style, 0);
         let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
 
-        // 在主窗口上方居中（主窗口可能隐藏，用工作区兜底）
-        let mut or = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         let mut base = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-        if GetWindowRect(owner, &mut or) != 0 {
-            base = or;
-        } else {
+        if GetWindowRect(owner, &mut base) == 0 {
             windows_sys::Win32::UI::WindowsAndMessaging::SystemParametersInfoW(
                 windows_sys::Win32::UI::WindowsAndMessaging::SPI_GETWORKAREA,
                 0,
@@ -188,8 +199,8 @@ pub fn open(owner: HWND) {
             GetModuleHandleW(std::ptr::null()),
             std::ptr::null(),
         );
-        let _ = hwnd; // WM_CREATE 内建状态
-        EnableWindow(owner, 0); // 模态感：主窗口不可点
+        // 控件在 WM_CREATE 里就绪；此处只做模态化与显示
+        EnableWindow(owner, 0);
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
         with_app(|app| app.settings_open = true);
@@ -201,14 +212,22 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
         WM_CREATE => {
             let cs = lp as *const windows_sys::Win32::UI::WindowsAndMessaging::CREATESTRUCTW;
             let owner = (*cs).hwndParent;
-            let (m, v, auto_hide, autost) = with_app(|app| {
-                (
-                    app.cfg.hotkey_mods,
-                    app.cfg.hotkey_vk,
-                    app.cfg.auto_hide,
-                    autostart_on(),
-                )
+            let dark = with_app(|app| app.dark);
+            let (m, v, auto_hide, theme_mode) = with_app(|app| {
+                (app.cfg.hotkey_mods, app.cfg.hotkey_vk, app.cfg.auto_hide, app.cfg.theme.clone())
             });
+            let autost = autostart_on();
+
+            // 暗色时标题栏跟随（Win10 19045+）
+            if dark {
+                let on: i32 = 1;
+                windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+                    hwnd,
+                    20, // DWMWA_USE_IMMERSIVE_DARK_MODE
+                    &on as *const i32 as *const core::ffi::c_void,
+                    4,
+                );
+            }
 
             let mk = |class: &str, text: &str, style: u32, x: i32, y: i32, w: i32, h: i32, id: u32| -> HWND {
                 CreateWindowExW(
@@ -228,45 +247,71 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             };
 
             let font = util::create_ui_font(false);
-            let st_label = mk("STATIC", "全局热键：", WS_CHILD | WS_VISIBLE, 12, 16, 62, 18, ST_LABEL);
-            let ed = mk(
-                "EDIT",
-                "",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER,
-                78, 12, 170, 24,
-                ED_HOTKEY,
-            );
+            let st_label = mk("STATIC", "全局热键：", WS_CHILD | WS_VISIBLE, 14, 16, 62, 18, ST_LABEL);
+            let ed = mk("EDIT", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 80, 12, 172, 24, ED_HOTKEY);
+            let st_theme = mk("STATIC", "主题：", WS_CHILD | WS_VISIBLE, 14, 50, 62, 18, ST_LABEL + 100);
+            let rd_light = mk("BUTTON", "浅色", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32 | WS_GROUP as u32, 80, 48, 56, 20, RD_LIGHT);
+            let rd_dark = mk("BUTTON", "暗色", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 140, 48, 56, 20, RD_DARK);
+            let rd_system = mk("BUTTON", "跟随系统", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 200, 48, 84, 20, RD_SYSTEM);
+            // checkbox 文字由 STATIC 承担：DarkMode_Explorer 主题下系统自绘的
+            // checkbox 文字颜色不受 WM_CTLCOLORSTATIC 控制，会隐入深色背景
             let chk_hide = mk(
                 "BUTTON",
-                "失焦时自动隐藏窗口",
+                "",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX as u32,
-                12, 48, 240, 20,
+                14, 82, 18, 18,
                 CHK_AUTOHIDE,
+            );
+            let st_hide = mk(
+                "STATIC",
+                "失焦时自动隐藏窗口",
+                WS_CHILD | WS_VISIBLE | SS_NOTIFY,
+                38, 83, 220, 18,
+                ST_HIDE,
             );
             let chk_auto = mk(
                 "BUTTON",
-                "开机时自动启动 MiniNotes",
+                "",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX as u32,
-                12, 74, 240, 20,
+                14, 108, 18, 18,
                 CHK_AUTOSTART,
+            );
+            let st_auto = mk(
+                "STATIC",
+                "开机时自动启动 MiniNotes",
+                WS_CHILD | WS_VISIBLE | SS_NOTIFY,
+                38, 109, 220, 18,
+                ST_AUTO,
             );
             let st_hint = mk(
                 "STATIC",
                 "点击热键输入框后按下组合键即可录入（如 Alt+N）。\n热键需包含 Ctrl / Alt / Shift / Win 至少一个修饰键。",
                 WS_CHILD | WS_VISIBLE,
-                12, 102, 332, 36,
+                14, 136, 336, 36,
                 ST_HINT,
             );
-            let btn_save = mk("BUTTON", "保存", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 180, 166, 80, 28, BTN_SAVE);
-            let btn_cancel = mk("BUTTON", "取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 268, 166, 80, 28, BTN_CANCEL);
+            let btn_save = mk("BUTTON", "保存", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 180, 208, 80, 30, BTN_SAVE);
+            let btn_cancel = mk("BUTTON", "取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 268, 208, 80, 30, BTN_CANCEL);
 
-            for h in [st_label, ed, chk_hide, chk_auto, st_hint, btn_save, btn_cancel] {
+            for h in [st_label, ed, st_theme, rd_light, rd_dark, rd_system, chk_hide, st_hide, chk_auto, st_auto, st_hint, btn_save, btn_cancel] {
                 util::apply_font(h, font);
             }
+
+            // 复选框/单选钮的图形在暗色下用系统暗色主题绘制（文字由 STATIC 承担）
+            let theme_name = if dark { "DarkMode_Explorer" } else { "Explorer" };
+            for h in [rd_light, rd_dark, rd_system, chk_hide, chk_auto] {
+                SetWindowTheme(h, wide(theme_name).as_ptr(), std::ptr::null());
+            }
+
             SetWindowTextW(ed, wide(&hotkey::text(m, v)).as_ptr());
-            send_msg_checked(chk_hide, BM_SETCHECK, if auto_hide { BST_CHECKED as usize } else { 0 });
-            send_msg_checked(chk_auto, BM_SETCHECK, if autost { BST_CHECKED as usize } else { 0 });
+            send_checked(rd_light, theme_mode == "light");
+            send_checked(rd_dark, theme_mode == "dark");
+            send_checked(rd_system, theme_mode == "system");
+            send_checked(chk_hide, auto_hide);
+            send_checked(chk_auto, autost);
             SetWindowSubclass(ed, Some(capture_proc), SUB_CAPTURE, 0);
+            SetWindowSubclass(btn_save, Some(sbtn_proc), SUB_SBTN, 0);
+            SetWindowSubclass(btn_cancel, Some(sbtn_proc), SUB_SBTN + 1, 0);
 
             ST.with(|s| {
                 *s.borrow_mut() = Some(SettingsState {
@@ -277,9 +322,71 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                     hk_mods: m,
                     hk_vk: v,
                     font,
+                    hover_save: false,
+                    hover_cancel: false,
+                    down_save: false,
+                    down_cancel: false,
                 })
             });
             0
+        }
+        WM_ERASEBKGND => {
+            with_app(|app| unsafe {
+                let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rc);
+                let b = CreateSolidBrush(theme::palette(app.dark).window_bg);
+                FillRect(wp as isize, &rc, b);
+                DeleteObject(b);
+            });
+            1
+        }
+        WM_CTLCOLORSTATIC => {
+            let hdc = wp as isize;
+            with_app(|app| unsafe {
+                let p = theme::palette(app.dark);
+                let ctl = lp as HWND;
+                let is_hint =
+                    windows_sys::Win32::UI::WindowsAndMessaging::GetDlgCtrlID(ctl) == ST_HINT as i32;
+                windows_sys::Win32::Graphics::Gdi::SetBkColor(hdc, p.window_bg);
+                windows_sys::Win32::Graphics::Gdi::SetTextColor(hdc, if is_hint { p.text_sec } else { p.text });
+                app.brushes.window_bg
+            })
+        }
+        WM_CTLCOLOREDIT => {
+            let hdc = wp as isize;
+            with_app(|app| unsafe {
+                let p = theme::palette(app.dark);
+                windows_sys::Win32::Graphics::Gdi::SetBkColor(hdc, p.surface2);
+                windows_sys::Win32::Graphics::Gdi::SetTextColor(hdc, p.text);
+                app.brushes.surface2
+            })
+        }
+        WM_DRAWITEM => {
+            let di = lp as *const DRAWITEMSTRUCT;
+            if !di.is_null() {
+                with_st(|s| {
+                    let (text, kind, hov, down) = if (*di).CtlID == BTN_SAVE {
+                        ("保存", BtnKind::Primary, s.hover_save, s.down_save)
+                    } else {
+                        ("取消", BtnKind::Tonal, s.hover_cancel, s.down_cancel)
+                    };
+                    with_app(|app| unsafe {
+                        theme::draw_button(
+                            (*di).hDC,
+                            (*di).rcItem,
+                            text,
+                            kind,
+                            hov,
+                            down || ((*di).itemState & ODS_SELECTED != 0),
+                            app.dark,
+                            s.font,
+                            BtnAlign::Center,
+                        );
+                    });
+                });
+                return 1;
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
         }
         WM_COMMAND => {
             let id = (wp & 0xFFFF) as u32;
@@ -287,6 +394,13 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 apply(hwnd);
             } else if id == BTN_CANCEL {
                 DestroyWindow(hwnd);
+            } else if id == ST_HIDE {
+                // 点击文字标签 = 切换对应勾选框
+                let chk = with_st(|s| s.chk_autohide);
+                unsafe { SendMessageW(chk, BM_CLICK, 0, 0) };
+            } else if id == ST_AUTO {
+                let chk = with_st(|s| s.chk_autostart);
+                unsafe { SendMessageW(chk, BM_CLICK, 0, 0) };
             }
             0
         }
@@ -308,9 +422,89 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
     }
 }
 
-/// SendMessageW 的薄包装（BM_SETCHECK 用），减少裸 unsafe
-fn send_msg_checked(hwnd: HWND, msg: u32, wp: usize) {
-    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW(hwnd, msg, wp, 0) };
+fn send_checked(hwnd: HWND, on: bool) {
+    unsafe { SendMessageW(hwnd, BM_SETCHECK, if on { BST_CHECKED as usize } else { 0 }, 0) };
+}
+
+fn is_checked(hwnd: HWND) -> bool {
+    unsafe { SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED as isize }
+}
+
+/// 设置对话框按钮的悬停/按下跟踪
+unsafe extern "system" fn sbtn_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    id: usize,
+    _d: usize,
+) -> LRESULT {
+    let is_save = id == SUB_SBTN;
+    match msg {
+        // 禁止系统在 DRAWITEM 前擦底
+        WM_ERASEBKGND => return 1,
+        WM_MOUSEMOVE => {
+            let changed = with_st(|s| {
+                if is_save {
+                    if !s.hover_save {
+                        s.hover_save = true;
+                        true
+                    } else {
+                        false
+                    }
+                } else if !s.hover_cancel {
+                    s.hover_cancel = true;
+                    true
+                } else {
+                    false
+                }
+            });
+            if changed {
+                let mut tme = windows_sys::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<windows_sys::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT>() as u32,
+                    dwFlags: windows_sys::Win32::UI::Input::KeyboardAndMouse::TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                windows_sys::Win32::UI::Input::KeyboardAndMouse::TrackMouseEvent(&mut tme);
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+            }
+        }
+        WM_MOUSELEAVE => {
+            with_st(|s| {
+                if is_save {
+                    s.hover_save = false;
+                    s.down_save = false;
+                } else {
+                    s.hover_cancel = false;
+                    s.down_cancel = false;
+                }
+            });
+            InvalidateRect(hwnd, std::ptr::null(), 0);
+        }
+        WM_LBUTTONDOWN => {
+            with_st(|s| {
+                if is_save {
+                    s.down_save = true;
+                } else {
+                    s.down_cancel = true;
+                }
+            });
+            InvalidateRect(hwnd, std::ptr::null(), 0);
+        }
+        WM_LBUTTONUP => {
+            with_st(|s| {
+                if is_save {
+                    s.down_save = false;
+                } else {
+                    s.down_cancel = false;
+                }
+            });
+            InvalidateRect(hwnd, std::ptr::null(), 0);
+        }
+        _ => {}
+    }
+    DefSubclassProc(hwnd, msg, wp, lp)
 }
 
 unsafe extern "system" fn capture_proc(
@@ -328,7 +522,6 @@ unsafe extern "system" fn capture_proc(
         }
         let (m0, v0) = with_st(|s| (s.hk_mods, s.hk_vk));
         if vk == windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE as u32 {
-            // Esc 恢复显示
             SetWindowTextW(hwnd, wide(&hotkey::text(m0, v0)).as_ptr());
             return 1;
         }
@@ -349,7 +542,6 @@ unsafe extern "system" fn capture_proc(
         if win {
             mods |= windows_sys::Win32::UI::Input::KeyboardAndMouse::MOD_WIN;
         }
-        // 只按修饰键：先显示"Ctrl + …"等待主键
         if hotkey::is_modifier(vk) {
             let mut parts = vec![];
             if ctrl {
@@ -380,17 +572,19 @@ unsafe extern "system" fn capture_proc(
     DefSubclassProc(hwnd, msg, wp, lp)
 }
 
-fn is_checked(hwnd: HWND) -> bool {
-    unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW(hwnd, BM_GETCHECK, 0, 0)
-            == BST_CHECKED as isize
-    }
-}
-
 fn apply(hwnd: HWND) {
     let (m, v) = with_st(|s| (s.hk_mods, s.hk_vk));
     let auto_hide = with_st(|s| is_checked(s.chk_autohide));
     let autost = with_st(|s| is_checked(s.chk_autostart));
+    let theme_mode = with_st(|s| {
+        if is_checked(find_child(s.hwnd, RD_DARK)) {
+            "dark"
+        } else if is_checked(find_child(s.hwnd, RD_SYSTEM)) {
+            "system"
+        } else {
+            "light"
+        }
+    });
 
     if !hotkey::valid(m, v) {
         unsafe {
@@ -398,7 +592,7 @@ fn apply(hwnd: HWND) {
                 hwnd,
                 wide("热键需包含 Ctrl / Alt / Shift / Win 中至少一个修饰键，请重新录入。").as_ptr(),
                 wide("热键无效").as_ptr(),
-                0x30, // MB_ICONWARNING
+                0x30,
             );
         };
         return;
@@ -414,7 +608,6 @@ fn apply(hwnd: HWND) {
             app.cfg.hotkey_vk = v;
             true
         } else {
-            // 恢复旧热键
             let _ = hotkey::register(app.hwnd, app.cfg.hotkey_mods, app.cfg.hotkey_vk);
             false
         }
@@ -435,7 +628,15 @@ fn apply(hwnd: HWND) {
     with_app(|app| {
         app.cfg.auto_hide = auto_hide;
         app.cfg.autostart = autost;
+        app.cfg.theme = theme_mode.to_string();
         crate::config::save(&app.cfg);
+        crate::window::apply_theme(app);
     });
     unsafe { DestroyWindow(hwnd) };
+}
+
+fn find_child(parent: HWND, id: u32) -> HWND {
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::GetDlgItem(parent, id as i32)
+    }
 }
