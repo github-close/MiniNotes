@@ -49,6 +49,7 @@ pub const ID_TODO_CLEAR: u32 = 204;
 pub const ID_NOTE_LIST: u32 = 301;
 pub const ID_NOTE_NEW: u32 = 302;
 pub const ID_EDITOR: u32 = 303;
+pub const ID_SETTINGS_BTN: u32 = 210;
 pub const TIMER_SAVE: usize = 1;
 
 pub const TAB_TODO: usize = 0;
@@ -79,6 +80,7 @@ pub struct App {
     pub todo_add: HWND,
     pub todo_list: HWND,
     pub todo_clear: HWND,
+    pub settings_btn: HWND,
     pub note_list: HWND,
     pub note_new: HWND,
     pub editor: HWND,
@@ -203,6 +205,7 @@ pub fn init_app(hwnd: HWND, cfg: Config) {
         todo_add: 0,
         todo_list: 0,
         todo_clear: 0,
+        settings_btn: 0,
         note_list: 0,
         note_new: 0,
         editor: 0,
@@ -238,6 +241,7 @@ pub fn init_app(hwnd: HWND, cfg: Config) {
             ID_TODO_LIST,
         );
         let todo_clear = child(hwnd, "BUTTON", "清除已完成", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, 0, ID_TODO_CLEAR);
+        let settings_btn = child(hwnd, "BUTTON", "⚙ 设置", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32, 0, ID_SETTINGS_BTN);
         let note_list = child(
             hwnd,
             "SysListView32",
@@ -278,7 +282,7 @@ pub fn init_app(hwnd: HWND, cfg: Config) {
         // 字体
         let font = util::create_ui_font(false);
         let font_strike = util::create_ui_font(true);
-        for h in [tab, todo_input, todo_add, todo_list, todo_clear, note_list, note_new, editor] {
+        for h in [tab, todo_input, todo_add, todo_list, todo_clear, settings_btn, note_list, note_new, editor] {
             util::apply_font(h, font);
         }
 
@@ -294,6 +298,7 @@ pub fn init_app(hwnd: HWND, cfg: Config) {
             app.todo_add = todo_add;
             app.todo_list = todo_list;
             app.todo_clear = todo_clear;
+            app.settings_btn = settings_btn;
             app.note_list = note_list;
             app.note_new = note_new;
             app.editor = editor;
@@ -348,6 +353,7 @@ fn layout(app: &App) {
         }
         let tab_h = 30;
         MoveWindow(app.tab, 0, 0, w, tab_h, 1);
+        MoveWindow(app.settings_btn, w - 64, 4, 58, 22, 1);
         let py = tab_h;
         let ph = h - tab_h;
         let cur = current_tab(app);
@@ -572,6 +578,7 @@ fn on_command(wp: WPARAM) -> LRESULT {
         (0, ID_TODO_ADD) => with_app(todos::add_from_input),
         (0, ID_TODO_CLEAR) => with_app(todos::clear_done),
         (0, ID_NOTE_NEW) => with_app(notes::create_note),
+        (0, ID_SETTINGS_BTN) => with_app(|app| settings::open(app.hwnd)),
         _ => {}
     }
     0
