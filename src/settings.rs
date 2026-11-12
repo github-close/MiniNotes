@@ -105,6 +105,14 @@ fn st_ready() -> bool {
 
 const RUN_SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const RUN_VAL: &str = "MiniNotes";
+/// 自启注册表命令带的参数：开机自启保持托盘常驻，不带此参数的启动（手动双击）
+/// 则把主窗口展示到桌面
+pub const LAUNCH_FLAG: &str = "--hidden";
+
+/// 自启注册表应写入的完整命令
+fn autostart_cmd() -> String {
+    format!("\"{}\" {}", util::exe_path(), LAUNCH_FLAG)
+}
 
 pub fn autostart_on() -> bool {
     unsafe {
@@ -127,7 +135,7 @@ pub fn autostart_on() -> bool {
     }
 }
 
-/// on=true 写入带引号的 exe 完整路径；on=false 删除
+/// on=true 写入带引号的 exe 完整路径 + --hidden 参数；on=false 删除
 pub fn autostart_set(on: bool) -> bool {
     unsafe {
         if on {
@@ -146,8 +154,7 @@ pub fn autostart_set(on: bool) -> bool {
             ) != 0 {
                 return false;
             }
-            let path = format!("\"{}\"", util::exe_path());
-            let data = wide(&path);
+            let data = wide(&autostart_cmd());
             let name = wide(RUN_VAL);
             let r = RegSetValueExW(
                 hk,
@@ -170,6 +177,37 @@ pub fn autostart_set(on: bool) -> bool {
             RegCloseKey(hk);
             r == 0 || r == 2 // 2 = ERROR_FILE_NOT_FOUND，视为成功
         }
+    }
+}
+
+/// 注册表里已有自启值但不是当前期望命令（旧版本写入的不带 --hidden 的裸路径）
+/// → 需要静默改写，否则旧条目开机自启时会把主窗口弹到桌面
+pub fn autostart_stale() -> bool {
+    unsafe {
+        let mut hk: HKEY = 0;
+        let sub = wide(RUN_SUBKEY);
+        if RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_READ, &mut hk) != 0 {
+            return false;
+        }
+        let name = wide(RUN_VAL);
+        let mut buf = [0u16; 512];
+        let mut len = (buf.len() * 2) as u32;
+        let mut typ = 0u32;
+        let r = RegQueryValueExW(
+            hk,
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut typ,
+            buf.as_mut_ptr() as *mut u8,
+            &mut len,
+        );
+        RegCloseKey(hk);
+        if r != 0 || typ != REG_SZ {
+            return false;
+        }
+        let n = (len as usize / 2).min(buf.len());
+        let cur = String::from_utf16_lossy(&buf[..n]);
+        cur.trim_end_matches('\0') != autostart_cmd()
     }
 }
 

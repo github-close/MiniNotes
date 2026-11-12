@@ -80,6 +80,18 @@ fn main() {
             }
         });
 
+        // 旧版本自启注册表写的是裸路径（无 --hidden）：静默改写迁移，
+        // 否则旧条目每次开机都会把主窗口弹到桌面
+        if crate::settings::autostart_stale() {
+            crate::settings::autostart_set(true);
+        }
+        // 手动启动（双击/快捷方式，无 --hidden 参数）直接把窗口展示到桌面；
+        // 开机自启（注册表命令带 --hidden）保持托盘常驻不打扰
+        let launched_hidden = std::env::args().any(|a| a == crate::settings::LAUNCH_FLAG);
+        if !launched_hidden {
+            window::show_main();
+        }
+
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, 0, 0, 0) > 0 {
             TranslateMessage(&msg);
