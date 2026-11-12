@@ -1218,6 +1218,10 @@ fn on_command(wp: WPARAM) -> LRESULT {
                 if app.note_dirty {
                     unsafe { SetTimer(app.hwnd, TIMER_SAVE, 600, None) };
                 }
+                // 输入法组词上屏后，EDIT 对后续删除的增量失效区会漏算首字符区域，
+                // 被删字形残留在屏上（要等下一次全量重绘才消失）——内容一变就让
+                // 编辑器整体失效重绘，屏幕永远与内容同步
+                unsafe { InvalidateRect(app.editor, std::ptr::null(), 0) };
             });
         }
         (EN_SETFOCUS, ID_TODO_INPUT) | (EN_KILLFOCUS, ID_TODO_INPUT) => {
