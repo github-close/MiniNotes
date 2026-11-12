@@ -117,6 +117,14 @@ pub fn on_custom_draw(app: &crate::window::App, nm: &NMLVCUSTOMDRAW) -> LRESULT 
         let lv = nm.nmcd.hdr.hwndFrom;
         match nm.nmcd.dwDrawStage {
             CDDS_PREPAINT => {
+                // 整个客户区先铺窗口底色：主题列表自身的底色与窗口底色存在色差，
+                // 透出来会像一块凸出的面板；铺平后行底/空区与窗口完全一致
+                let p = theme::palette(app.dark);
+                let mut full = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(lv, &mut full);
+                let b = CreateSolidBrush(p.window_bg);
+                FillRect(nm.nmcd.hdc, &full, b);
+                DeleteObject(b);
                 if SendMessageW(lv, LVM_GETITEMCOUNT, 0, 0) == 0 {
                     CDRF_NOTIFYPOSTPAINT as LRESULT
                 } else {

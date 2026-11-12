@@ -2,6 +2,7 @@
 
 mod config;
 mod hotkey;
+mod menu;
 mod notes;
 mod rename;
 mod settings;

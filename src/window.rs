@@ -20,8 +20,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DrawIconEx, EN_KILLFOCUS, EN_SETFOCUS, GetAncestor, GetClientRect, GetCursorPos,
+    CreateWindowExW, DefWindowProcW, DestroyWindow,
+    DrawIconEx, EN_KILLFOCUS, EN_SETFOCUS, GetAncestor, GetClientRect,
     GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId, GA_ROOT, HTBOTTOM,
     HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
     HTTOPRIGHT, IDC_ARROW, IsIconic, IsWindowVisible, IsZoomed, KillTimer, LoadCursorW,
@@ -29,12 +29,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SendMessageW, SetForegroundWindow, SetTimer, ShowWindow, SystemParametersInfoW,
     SIZE_MINIMIZED, SW_HIDE, SW_RESTORE, SW_SHOW, SPI_GETWORKAREA, SM_CXSIZEFRAME,
     SM_CXPADDEDBORDER, SM_CYSIZEFRAME,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, BS_OWNERDRAW, DI_NORMAL, WNDCLASSW,
-    MF_SEPARATOR, MF_STRING, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC,
+    BS_OWNERDRAW, DI_NORMAL, WNDCLASSW,
+    WM_ACTIVATE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC,
     WM_CTLCOLOREDIT, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HOTKEY,
     WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE,
     WM_NCHITTEST,
-    WM_NOTIFY, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SIZE, WM_SYSKEYDOWN,
+    WM_NOTIFY, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SIZE, WM_SYSKEYDOWN,
     WM_TIMER, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
     WS_VSCROLL, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME, WS_CLIPCHILDREN,
 };
@@ -342,6 +342,9 @@ pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
     let dark = theme::resolve_dark(&cfg.theme);
     let mut brushes = theme::Brushes::new();
     brushes.rebuild(dark);
+    // 弹出菜单（列表右键/托盘）暗色除进程级 PreferredAppMode 外，
+    // 还要求 owner 窗口允许暗色，缺一则菜单保持系统浅色
+    theme::allow_dark_chrome(hwnd);
     set_app(App {
         hwnd,
         hicon,
@@ -510,11 +513,22 @@ pub fn apply_theme(app: &mut App) {
     let dark = theme::resolve_dark(&app.cfg.theme);
     app.dark = dark;
     app.brushes.rebuild(dark);
+    // 总开关先行：不开它，DarkMode_Explorer 的部件（列表底/滚动条/光标/菜单）
+    // 仍按浅色渲染（见 theme.rs set_system_dark 说明）
+    theme::set_system_dark(dark);
     unsafe {
         editor_set_margin(app.editor, 10, 8);
 
-        // 列表：背景 / 文字 / 文字底透明；内联编辑与滚动条跟随系统暗色主题
+        // 列表：背景 / 文字 / 文字底透明；滚动条跟随系统暗色主题
+        // EDIT（编辑器/待办输入框）：暗色滚动条与光标
         let theme_name = if dark { "DarkMode_Explorer" } else { "Explorer" };
+        for h in [app.editor, app.todo_input] {
+            windows_sys::Win32::UI::Controls::SetWindowTheme(
+                h,
+                util::wide(theme_name).as_ptr(),
+                std::ptr::null(),
+            );
+        }
         let old_himl = app.himl;
         let himl = make_checkbox_imagelist(dark);
         app.himl = himl;
@@ -1320,23 +1334,18 @@ fn on_tray(hwnd: HWND, lp: LPARAM) -> LRESULT {
 // ---------- 右键菜单 ----------
 
 fn popup_at(hwnd: HWND, items: &[(u32, &str, bool)]) -> u32 {
-    unsafe {
-        let menu = CreatePopupMenu();
-        for (id, text, sep) in items {
-            if *sep {
-                AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-            } else {
-                AppendMenuW(menu, MF_STRING, *id as usize, util::wide(text).as_ptr());
-            }
-        }
-        let mut pt = POINT { x: 0, y: 0 };
-        GetCursorPos(&mut pt);
-        SetForegroundWindow(hwnd);
-        let cmd = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, std::ptr::null()) as u32;
-        PostMessageW(hwnd, WM_NULL, 0, 0);
-        DestroyMenu(menu);
-        cmd
-    }
+    // 自绘菜单替代原生 TrackPopupMenu：配色跟随应用主题（原因见 menu.rs 模块注释）
+    let list: Vec<crate::menu::Item> = items
+        .iter()
+        .map(|(id, text, sep)| crate::menu::Item {
+            id: *id,
+            text: (*text).to_string(),
+            sep: *sep,
+            checked: false,
+        })
+        .collect();
+    let dark = with_app(|app| app.dark);
+    crate::menu::show(hwnd, dark, &list)
 }
 
 fn note_ctx_menu(hwnd: HWND) {
@@ -1467,6 +1476,37 @@ unsafe extern "system" fn child_subclass(
             }
         }
         return DefSubclassProc(hwnd, msg, wp, lp);
+    }
+    // 列表的两个暗色补丁（内联重命名编辑框挂在列表下，消息由列表收到）：
+    // WM_ERASEBKGND：擦除用窗口底色，避免主题底色与自绘底色在滚动时闪色差
+    // WM_CTLCOLOREDIT：重命名编辑框默认白底黑字（DefWindowProc 兜底），
+    //   在这里主题化成与待办输入框一致的 surface2 底
+    if id == SUB_NOTE_LIST || id == SUB_TODO_LIST {
+        match msg {
+            WM_ERASEBKGND => {
+                with_app(|app| unsafe {
+                    let p = theme::palette(app.dark);
+                    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                    GetClientRect(hwnd, &mut rc);
+                    let b = CreateSolidBrush(p.window_bg);
+                    FillRect(wp as HDC, &rc, b);
+                    DeleteObject(b);
+                });
+                return 1;
+            }
+            WM_CTLCOLOREDIT => {
+                let hdc = wp as HDC;
+                let brush = with_app(|app| unsafe {
+                    let p = theme::palette(app.dark);
+                    SetBkMode(hdc, TRANSPARENT as i32);
+                    SetTextColor(hdc, p.text);
+                    windows_sys::Win32::Graphics::Gdi::SetBkColor(hdc, p.surface2);
+                    app.brushes.surface2
+                });
+                return brush;
+            }
+            _ => {}
+        }
     }
     if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
         let vk = wp as u32;

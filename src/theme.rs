@@ -111,6 +111,97 @@ pub fn palette(dark: bool) -> &'static Palette {
     }
 }
 
+// ---------- 系统暗色开关（uxtheme 未公开序号函数，Win10 1809+） ----------
+
+// comctl32 的 "DarkMode_Explorer" 主题只有在 uxtheme 内部的暗色模式打开后
+// 才真正用暗色部件渲染（列表底色、滚动条、EDIT 光标等），否则仍是浅色；
+// TrackPopupMenu 弹出菜单的配色也由这同一个开关决定。
+// 这组序号被 Windows Terminal 等一线应用广泛使用，Win10/11 上长期稳定。
+
+const PAM_FORCE_LIGHT: i32 = 3;
+const PAM_FORCE_DARK: i32 = 2;
+
+struct UxTheme {
+    /// 序号 132：刷新 uxtheme 缓存的系统配色策略
+    refresh: unsafe extern "system" fn(),
+    /// 序号 135：设置本进程的首选应用模式（强制亮/暗）
+    set_mode: unsafe extern "system" fn(i32) -> i32,
+    /// 序号 136：使菜单主题缓存失效，切换立即生效
+    flush: unsafe extern "system" fn(),
+    /// 序号 133：允许单个窗口使用暗色非客户区（标题栏）
+    allow_window: unsafe extern "system" fn(isize, i32) -> i32,
+}
+
+static UXTHEME: std::sync::OnceLock<Option<UxTheme>> = std::sync::OnceLock::new();
+
+/// 按序号解析 uxtheme 函数；任一缺失（老系统/被精简）则整体放弃，功能优雅降级
+fn uxtheme() -> Option<&'static UxTheme> {
+    UXTHEME
+        .get_or_init(|| unsafe {
+            let lib = windows_sys::Win32::System::LibraryLoader::LoadLibraryW(
+                crate::util::wide("uxtheme.dll").as_ptr(),
+            );
+            if lib == 0 {
+                return None;
+            }
+            // GetProcAddress 第二参数也可以是序号（MAKEINTRESOURCE 语义）
+            let proc = |ord: u32| -> usize {
+                match windows_sys::Win32::System::LibraryLoader::GetProcAddress(lib, ord as *const u8)
+                {
+                    Some(f) => f as usize,
+                    None => 0,
+                }
+            };
+            let (refresh, set_mode, flush, allow_window) =
+                (proc(132), proc(135), proc(136), proc(133));
+            if refresh == 0 || set_mode == 0 || flush == 0 || allow_window == 0 {
+                return None;
+            }
+            Some(UxTheme {
+                refresh: std::mem::transmute(refresh),
+                set_mode: std::mem::transmute(set_mode),
+                flush: std::mem::transmute(flush),
+                allow_window: std::mem::transmute(allow_window),
+            })
+        })
+        .as_ref()
+}
+
+/// 让系统的暗色部件与弹出菜单按 dark 渲染。用 ForceDark/ForceLight 而非
+/// AllowDark：应用主题是显式三选，即使系统是亮色，选了暗色菜单也必须暗
+/// （"跟随系统"档时 app.dark 本就等于系统值，同样成立）。
+pub fn set_system_dark(dark: bool) {
+    if let Some(f) = uxtheme() {
+        unsafe {
+            (f.refresh)();
+            (f.set_mode)(if dark { PAM_FORCE_DARK } else { PAM_FORCE_LIGHT });
+            (f.flush)();
+        }
+    }
+}
+
+/// 窗口允许暗色非客户区：uxtheme 序号 + DWMWA_USE_IMMERSIVE_DARK_MODE
+/// （属性 20；旧版本是 19，两个都设，第一个成功即止）。
+pub fn allow_dark_chrome(hwnd: isize) {
+    if let Some(f) = uxtheme() {
+        unsafe { (f.allow_window)(hwnd, 1) };
+    }
+    unsafe {
+        let on: i32 = 1;
+        for attr in [20u32, 19] {
+            if windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+                hwnd,
+                attr,
+                &on as *const i32 as *const core::ffi::c_void,
+                4,
+            ) == 0
+            {
+                break;
+            }
+        }
+    }
+}
+
 /// "light"/"dark"/"system" -> 是否暗色。system 读注册表（无该键的老系统按浅色）。
 pub fn resolve_dark(mode: &str) -> bool {
     match mode {

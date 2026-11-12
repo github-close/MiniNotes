@@ -50,6 +50,10 @@ const ST_HIDE: u32 = 11;
 const ST_AUTO: u32 = 12;
 const ST_TITLE: u32 = 13;
 const ST_TAG: u32 = 14;
+// 单选钮的 STATIC 文字标签（点击 = 切换对应单选钮）
+const ST_RDL: u32 = 15;
+const ST_RDD: u32 = 16;
+const ST_RDS: u32 = 17;
 const SUB_CAPTURE: usize = 10;
 const SUB_SBTN: usize = 11;
 const SS_NOTIFY: u32 = 0x0100; // windows-sys 0.52 缺失
@@ -219,11 +223,14 @@ pub fn open(owner: HWND) {
         if hwnd == 0 {
             return; // 创建失败：不要禁用主窗口，否则再也点不动
         }
-        // 控件在 WM_CREATE 里就绪；此处只做模态化与显示
+        // 控件在 WM_CREATE 里就绪；此处只做模态化与显示。
+        // 守卫必须先于 EnableWindow：禁用前台的主窗口会让系统立刻收回前台、
+        // 主窗口收到 WM_ACTIVATE(0)，此时若 settings_open 还没置位，失焦隐藏
+        // 会用旧配置把主窗口藏回托盘（关掉设置后看起来就是"窗口自己消失了"）
+        with_app(|app| app.settings_open = true);
         EnableWindow(owner, 0);
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
-        with_app(|app| app.settings_open = true);
     }
 }
 
@@ -238,15 +245,9 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             });
             let autost = autostart_on();
 
-            // 暗色时标题栏跟随（Win10 19045+）
+            // 暗色时标题栏跟随（uxtheme 序号 + DWM 属性，老版本自动回退属性 19）
             if dark {
-                let on: i32 = 1;
-                windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute(
-                    hwnd,
-                    20, // DWMWA_USE_IMMERSIVE_DARK_MODE
-                    &on as *const i32 as *const core::ffi::c_void,
-                    4,
-                );
+                crate::theme::allow_dark_chrome(hwnd);
             }
 
             let mk = |class: &str, text: &str, style: u32, x: i32, y: i32, w: i32, h: i32, id: u32| -> HWND {
@@ -314,9 +315,15 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             let st_label = mk("STATIC", "全局热键：", WS_CHILD | WS_VISIBLE, 14, 16 + BANNER_SHIFT, 62, 18, ST_LABEL);
             let ed = mk("EDIT", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 80, 12 + BANNER_SHIFT, 172, 24, ED_HOTKEY);
             let st_theme = mk("STATIC", "主题：", WS_CHILD | WS_VISIBLE, 14, 50 + BANNER_SHIFT, 62, 18, ST_LABEL + 100);
-            let rd_light = mk("BUTTON", "浅色", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32 | WS_GROUP as u32, 80, 48 + BANNER_SHIFT, 56, 20, RD_LIGHT);
-            let rd_dark = mk("BUTTON", "暗色", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 140, 48 + BANNER_SHIFT, 56, 20, RD_DARK);
-            let rd_system = mk("BUTTON", "跟随系统", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 200, 48 + BANNER_SHIFT, 84, 20, RD_SYSTEM);
+            // 单选钮只留圆圈、文字由 STATIC 承担：系统自绘的单选/复选文字颜色
+            // 不受 WM_CTLCOLORSTATIC 控制，暗色下会隐入背景（与下方复选框同理）；
+            // SS_NOTIFY 让点击文字也能切换对应单选钮
+            let rd_light = mk("BUTTON", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32 | WS_GROUP as u32, 80, 48 + BANNER_SHIFT, 18, 18, RD_LIGHT);
+            let rd_dark = mk("BUTTON", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 148, 48 + BANNER_SHIFT, 18, 18, RD_DARK);
+            let rd_system = mk("BUTTON", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 216, 48 + BANNER_SHIFT, 18, 18, RD_SYSTEM);
+            let st_rdl = mk("STATIC", "浅色", WS_CHILD | WS_VISIBLE | SS_NOTIFY, 102, 49 + BANNER_SHIFT, 40, 18, ST_RDL);
+            let st_rdd = mk("STATIC", "暗色", WS_CHILD | WS_VISIBLE | SS_NOTIFY, 170, 49 + BANNER_SHIFT, 40, 18, ST_RDD);
+            let st_rds = mk("STATIC", "跟随系统", WS_CHILD | WS_VISIBLE | SS_NOTIFY, 238, 49 + BANNER_SHIFT, 84, 18, ST_RDS);
             // checkbox 文字由 STATIC 承担：DarkMode_Explorer 主题下系统自绘的
             // checkbox 文字颜色不受 WM_CTLCOLORSTATIC 控制，会隐入深色背景
             let chk_hide = mk(
@@ -359,13 +366,13 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
 
             util::apply_font(st_title, font_title);
             util::apply_font(st_tag, font);
-            for h in [st_label, ed, st_theme, rd_light, rd_dark, rd_system, chk_hide, st_hide, chk_auto, st_auto, st_hint, btn_save, btn_cancel] {
+            for h in [st_label, ed, st_theme, rd_light, st_rdl, rd_dark, st_rdd, rd_system, st_rds, chk_hide, st_hide, chk_auto, st_auto, st_hint, btn_save, btn_cancel] {
                 util::apply_font(h, font);
             }
 
-            // 复选框/单选钮的图形在暗色下用系统暗色主题绘制（文字由 STATIC 承担）
+            // 复选框/单选钮的图形与热键输入框的光标在暗色下用系统暗色主题绘制（文字由 STATIC 承担）
             let theme_name = if dark { "DarkMode_Explorer" } else { "Explorer" };
-            for h in [rd_light, rd_dark, rd_system, chk_hide, chk_auto] {
+            for h in [rd_light, rd_dark, rd_system, chk_hide, chk_auto, ed] {
                 SetWindowTheme(h, wide(theme_name).as_ptr(), std::ptr::null());
             }
 
@@ -492,6 +499,12 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             } else if id == ST_AUTO {
                 let chk = with_st(|s| s.chk_autostart);
                 unsafe { SendMessageW(chk, BM_CLICK, 0, 0) };
+            } else if id == ST_RDL {
+                unsafe { SendMessageW(find_child(hwnd, RD_LIGHT), BM_CLICK, 0, 0) };
+            } else if id == ST_RDD {
+                unsafe { SendMessageW(find_child(hwnd, RD_DARK), BM_CLICK, 0, 0) };
+            } else if id == ST_RDS {
+                unsafe { SendMessageW(find_child(hwnd, RD_SYSTEM), BM_CLICK, 0, 0) };
             }
             0
         }
@@ -502,7 +515,13 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
         WM_DESTROY => {
             with_st(|s| unsafe {
                 EnableWindow(s.owner, 1);
-                SetForegroundWindow(s.owner);
+                if windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(s.owner) != 0 {
+                    SetForegroundWindow(s.owner);
+                } else {
+                    // 主窗口在设置期间被隐藏（如旧入口路径的失焦隐藏）：
+                    // 关闭设置应回到主界面，而不是只剩托盘
+                    crate::window::show_main();
+                }
                 util::destroy_font(s.font);
                 util::destroy_font(s.font_title);
                 if s.logo_bmp != 0 {

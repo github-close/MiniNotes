@@ -1,14 +1,11 @@
-use windows_sys::Win32::Foundation::{HWND, POINT};
+use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
     NIM_MODIFY, NOTIFYICONDATAW,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW, SetForegroundWindow,
-    TrackPopupMenu, MF_CHECKED, MF_SEPARATOR, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP,
-    WM_NULL,
-};
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_APP;
 
+use crate::menu::{self, Item};
 use crate::util::wide;
 
 /// 托盘回调消息（老式版本：lParam = 鼠标消息）
@@ -60,38 +57,29 @@ pub fn notify(hwnd: HWND, title: &str, text: &str) {
     unsafe { Shell_NotifyIconW(NIM_MODIFY, &mut nid) };
 }
 
-/// 在光标处弹出托盘菜单，返回所选命令（0 = 取消）
+/// 在光标处弹出托盘菜单（自绘，配色跟随应用主题），返回所选命令（0 = 取消）
 pub fn show_menu(hwnd: HWND, autostart_on: bool) -> u32 {
-    unsafe {
-        let menu = CreatePopupMenu();
-        AppendMenuW(menu, MF_STRING, CMD_OPEN as usize, wide("打开主界面").as_ptr());
-        AppendMenuW(menu, MF_STRING, CMD_NEW_NOTE as usize, wide("新建笔记").as_ptr());
-        AppendMenuW(menu, MF_STRING, CMD_SETTINGS as usize, wide("设置…").as_ptr());
-        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        AppendMenuW(
-            menu,
-            MF_STRING | if autostart_on { MF_CHECKED } else { 0 },
-            CMD_AUTOSTART as usize,
-            wide("开机自启").as_ptr(),
-        );
-        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        AppendMenuW(menu, MF_STRING, CMD_QUIT as usize, wide("退出").as_ptr());
-
-        let mut pt = POINT { x: 0, y: 0 };
-        GetCursorPos(&mut pt);
-        // 经典套路：弹菜单前激活自己，否则菜单不消失
-        SetForegroundWindow(hwnd);
-        let cmd = TrackPopupMenu(
-            menu,
-            TPM_RIGHTBUTTON | TPM_RETURNCMD,
-            pt.x,
-            pt.y,
-            0,
-            hwnd,
-            std::ptr::null(),
-        ) as u32;
-        PostMessageW(hwnd, WM_NULL, 0, 0);
-        DestroyMenu(menu);
-        cmd
-    }
+    let item = |id: u32, text: &str, checked: bool| Item {
+        id,
+        text: text.to_string(),
+        sep: false,
+        checked,
+    };
+    let sep = || Item {
+        id: 0,
+        text: String::new(),
+        sep: true,
+        checked: false,
+    };
+    let items = vec![
+        item(CMD_OPEN, "打开主界面", false),
+        item(CMD_NEW_NOTE, "新建笔记", false),
+        item(CMD_SETTINGS, "设置…", false),
+        sep(),
+        item(CMD_AUTOSTART, "开机自启", autostart_on),
+        sep(),
+        item(CMD_QUIT, "退出", false),
+    ];
+    let dark = crate::window::with_app(|app| app.dark);
+    menu::show(hwnd, dark, &items)
 }
