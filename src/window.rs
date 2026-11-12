@@ -30,9 +30,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SIZE_MINIMIZED, SW_HIDE, SW_RESTORE, SW_SHOW, SPI_GETWORKAREA, SM_CXSIZEFRAME,
     SM_CXPADDEDBORDER, SM_CYSIZEFRAME,
     BS_OWNERDRAW, DI_NORMAL, WNDCLASSW,
-    WM_ACTIVATE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC,
+    WM_ACTIVATE, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC,
     WM_CTLCOLOREDIT, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HOTKEY,
-    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE,
+    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_PASTE,
     WM_NCHITTEST,
     WM_NOTIFY, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SIZE, WM_SYSKEYDOWN,
     WM_TIMER, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
@@ -1485,8 +1485,28 @@ unsafe extern "system" fn child_subclass(
                     with_app(|app| crate::rename::cancel(app));
                     return 1;
                 }
+                // Shift+Insert 系统粘贴快捷键（无对应字符消息，须在 keydown 拦）
+                0x2D if (windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState(
+                    windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_SHIFT as i32,
+                ) as i16) < 0 =>
+                {
+                    crate::rename::paste_flattened(hwnd);
+                    return 1;
+                }
                 _ => {}
             }
+        }
+        if msg == WM_CHAR && wp as u32 == 0x16 {
+            // Ctrl+V 的字符消息（SYN）：标准 EDIT 在此触发粘贴（内部再转 WM_PASTE），
+            // 多行化后会带入换行，这里统一替换为过滤后的粘贴。
+            // 注意勿在 keydown 拦截 Ctrl+V——字符消息仍会到达，会变成双重插入
+            crate::rename::paste_flattened(hwnd);
+            return 1;
+        }
+        if msg == WM_PASTE {
+            // 右键菜单 / EDIT 内部转发的粘贴，同样过滤换行
+            crate::rename::paste_flattened(hwnd);
+            return 1;
         }
         return DefSubclassProc(hwnd, msg, wp, lp);
     }

@@ -6,15 +6,26 @@
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
+use windows_sys::Win32::System::DataExchange::{
+    CloseClipboard, GetClipboardData, OpenClipboard,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows_sys::Win32::UI::Controls::{LVM_GETCOLUMNWIDTH, LVM_GETITEMRECT};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, SendMessageW, ES_AUTOHSCROLL, WS_CHILD, WS_VISIBLE,
+    CreateWindowExW, DestroyWindow, GetClientRect, SendMessageW, ES_AUTOHSCROLL, ES_MULTILINE,
+    WS_CHILD, WS_VISIBLE,
 };
 
 /// EC_LEFTMARGIN | EC_RIGHTMARGIN 的设边距消息（windows-sys 未导出）
 const EM_SETMARGINS: u32 = 0x00D3;
+/// 设置格式矩形（windows-sys 未导出）：多行 EDIT 垂直居中文字用
+const EM_SETRECT: u32 = 0x00B3;
+/// 替换选区（windows-sys 未导出）：粘贴过滤后的文本用
+const EM_REPLACESEL: u32 = 0x00C2;
+/// CF_UNICODETEXT = 13（标准剪贴板格式，ABI 稳定值）
+const CF_TEXT_UNICODE: u32 = 13;
 
 use crate::util::{apply_font, get_text, wide};
 use crate::window::App;
@@ -77,7 +88,7 @@ pub fn start(app: &mut App, target: Target, text: &str) {
             0,
             wide("EDIT").as_ptr(),
             wide(text).as_ptr(),
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL as u32,
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL as u32 | ES_MULTILINE as u32,
             x,
             rc.top + 2,
             colw - x - 8,
@@ -106,6 +117,21 @@ pub fn start(app: &mut App, target: Target, text: &str) {
     unsafe { SendMessageW(edit, EM_SETMARGINS, 3, (2 | (4 << 16)) as LPARAM) };
     crate::window::set_rename_subclass(edit);
     unsafe { SetFocus(edit) };
+    // 文字垂直居中：单行 EDIT 永远在控件顶部画文本，框体高于一行时文字浮在上部。
+    // EM_SETRECT 只对多行 EDIT 生效，故以 ES_MULTILINE 创建（配 AUTOHSCROLL 仍为
+    // 单行水平滚动、不换行）。注意必须在最后发送：WM_SETFONT / SetFocus 等都会
+    // 重置格式矩形（实测 top 被冲回 0）。Enter/Esc 在 child_subclass 拦截提交/取消，
+    // 粘贴换行由 WM_CHAR/WM_PASTE 拦截与 commit 兜底折叠，不会真的成为多行
+    let mut crc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    unsafe { GetClientRect(edit, &mut crc) };
+    let line_h = crate::util::font_line_height(app.font);
+    let fr = RECT {
+        left: 0,
+        top: (crc.bottom - line_h) / 2,
+        right: crc.right,
+        bottom: crc.bottom,
+    };
+    unsafe { SendMessageW(edit, EM_SETRECT, 0, &fr as *const RECT as LPARAM) };
     app.rename = Some(State { edit, target });
 }
 
@@ -117,7 +143,11 @@ pub fn commit(app: &mut App, edit: HWND) -> bool {
         app.rename = Some(state);
         return false;
     }
-    let text = get_text(edit);
+    let mut text = get_text(edit);
+    // 兜底：任何路径混入的换行折叠成空格（标题是单行语义）
+    if text.contains('\r') || text.contains('\n') {
+        text = text.replace("\r", " ").replace("\n", " ");
+    }
     unsafe { DestroyWindow(edit) };
     let lv = state.target.lv(app);
     let applied = match state.target {
@@ -132,6 +162,47 @@ pub fn commit(app: &mut App, edit: HWND) -> bool {
 pub fn cancel(app: &mut App) {
     if let Some(state) = app.rename.take() {
         unsafe { DestroyWindow(state.edit) };
+    }
+}
+
+/// 多行化后的粘贴：读剪贴板文本、滤掉换行（折叠为空格）后插入选区。
+/// 系统原生粘贴会把换行带进多行 EDIT，破坏单行显示；此函数保持与旧单行
+/// EDIT 一致的「粘贴即摊平」行为。EM_REPLACESEL 传 TRUE 保留撤销栈
+pub fn paste_flattened(edit: HWND) {
+    unsafe {
+        if OpenClipboard(edit) == 0 {
+            return;
+        }
+        let mut text: Vec<u16> = Vec::new();
+        let h = GetClipboardData(CF_TEXT_UNICODE);
+        if h != 0 {
+            let size = GlobalSize(h as _);
+            let ptr = GlobalLock(h as _) as *const u16;
+            if !ptr.is_null() {
+                let slice = std::slice::from_raw_parts(ptr, size / 2);
+                let len = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
+                for &c in &slice[..len] {
+                    if c == '\r' as u16 {
+                        continue;
+                    }
+                    if c == '\n' as u16 {
+                        if text.last() != Some(&(' ' as u16)) {
+                            text.push(' ' as u16);
+                        }
+                    } else {
+                        text.push(c);
+                    }
+                }
+                GlobalUnlock(h as _);
+            }
+        }
+        CloseClipboard();
+        if !text.is_empty() {
+            SendMessageW(edit, EM_REPLACESEL, 1, text.as_ptr() as LPARAM);
+            // 多行 EDIT 的 EM_REPLACESEL 只失效插入跨度区域，插入点右侧被推移的
+            // 旧文字像素不会重绘，与新区内文字叠成花屏——整框强制重绘
+            InvalidateRect(edit, std::ptr::null(), 0);
+        }
     }
 }
 
