@@ -1,9 +1,9 @@
 use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen, CreateSolidBrush,
-    DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect, LineTo,
-    MoveToEx, SelectObject, SetBkMode, SetTextColor, DT_CENTER, DT_LEFT,
-    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, HDC, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
+    DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect, LineTo, MoveToEx,
+    SelectObject, SetBkMode, SetTextColor, DT_CENTER, DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
+    HDC, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
@@ -22,11 +22,13 @@ use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
     DrawIconEx, EN_KILLFOCUS, EN_SETFOCUS, GetAncestor, GetClientRect, GetCursorPos,
-    GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, GA_ROOT, HTBOTTOM,
+    GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId, GA_ROOT, HTBOTTOM,
     HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
-    HTTOPRIGHT, IDC_ARROW, IsWindowVisible, KillTimer, LoadCursorW, MINMAXINFO, MoveWindow,
-    PostMessageW, PostQuitMessage, RegisterClassW, SendMessageW, SetForegroundWindow, SetTimer,
-    ShowWindow, SystemParametersInfoW, SIZE_MINIMIZED, SW_HIDE, SW_SHOW, SPI_GETWORKAREA,
+    HTTOPRIGHT, IDC_ARROW, IsIconic, IsWindowVisible, IsZoomed, KillTimer, LoadCursorW,
+    MINMAXINFO, MoveWindow, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage, RegisterClassW,
+    SendMessageW, SetForegroundWindow, SetTimer, ShowWindow, SystemParametersInfoW,
+    SIZE_MINIMIZED, SW_HIDE, SW_RESTORE, SW_SHOW, SPI_GETWORKAREA, SM_CXSIZEFRAME,
+    SM_CXPADDEDBORDER, SM_CYSIZEFRAME,
     TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, BS_OWNERDRAW, DI_NORMAL, WNDCLASSW,
     MF_SEPARATOR, MF_STRING, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC,
     WM_CTLCOLOREDIT, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HOTKEY,
@@ -615,7 +617,11 @@ fn focus_page(app: &App) {
 
 pub fn show_main() {
     with_app(|app| unsafe {
-        if IsWindowVisible(app.hwnd) == 0 {
+        // 最小化过的窗口不能靠 SW_SHOW 还原：SW_SHOW 只是按当前（极小化）状态显示，
+        // 屏幕上仍然什么都看不到，必须走 SW_RESTORE
+        if IsIconic(app.hwnd) != 0 {
+            ShowWindow(app.hwnd, SW_RESTORE);
+        } else if IsWindowVisible(app.hwnd) == 0 {
             ShowWindow(app.hwnd, SW_SHOW);
         }
         SetForegroundWindow(app.hwnd);
@@ -649,7 +655,9 @@ pub fn toggle_main() {
 
 fn save_window_rect(app: &mut App) {
     unsafe {
-        if windows_sys::Win32::UI::WindowsAndMessaging::IsIconic(app.hwnd) != 0 {
+        // 最小化/最大化时窗口矩形不是用户摆放的“正常尺寸”（最大化时甚至是屏幕外的一圈），
+        // 都不落盘：保留上一次正常状态的位置尺寸
+        if IsIconic(app.hwnd) != 0 || IsZoomed(app.hwnd) != 0 {
             return;
         }
         let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
@@ -835,8 +843,23 @@ unsafe fn draw_x(hdc: HDC, rc: RECT, color: COLORREF) {
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     // WM_NCCALCSIZE 必须在 App 就绪前也生效（窗口创建期间就会收到，且 wParam 可能为 0）：
-    // 无条件返回 0 = 客户区覆盖整个窗口，系统边框/标题栏全部让位（阴影与贴靠由 DWM 承担）
+    // 返回 0 = 客户区覆盖整个窗口，系统边框/标题栏全部让位（阴影与贴靠由 DWM 承担）。
+    // 但最大化时系统给的窗口矩形是「工作区四周各大一圈边框」（左/上为负坐标、右/下压出
+    // 屏幕）：带边框窗口会把这圈当非客户区，我们返回 0 就会把它变成客户区，边缘内容被裁。
+    // 因此最大化时把客户区按边框宽度内缩回去。
     if msg == WM_NCCALCSIZE {
+        if wp != 0 && IsZoomed(hwnd) != 0 {
+            let p = lp as *mut NCCALCSIZE_PARAMS;
+            if !p.is_null() {
+                let fx = GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+                let fy = GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+                let r = &mut (*p).rgrc[0];
+                r.left += fx;
+                r.top += fy;
+                r.right -= fx;
+                r.bottom -= fy;
+            }
+        }
         return 0;
     }
     if !app_ready() {
@@ -1126,7 +1149,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
         MSG_DEL_TODO => {
-            with_app(notes::delete_selected);
+            with_app(todos::delete_selected);
             0
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
