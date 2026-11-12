@@ -1,7 +1,12 @@
 use std::cell::RefCell;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{FillRect, InvalidateRect, CreateSolidBrush, DeleteObject};
+use windows_sys::Win32::Graphics::Gdi::{
+    AC_SRC_ALPHA, AC_SRC_OVER, AlphaBlend, BeginPaint, BLENDFUNCTION, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, CreateCompatibleDC, CreateDIBSection, CreateFontW, DIB_RGB_COLORS,
+    DeleteDC, EndPaint, FillRect, GetDC, InvalidateRect, CreateSolidBrush, DeleteObject,
+    PAINTSTRUCT, ReleaseDC, SelectObject,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
@@ -15,10 +20,10 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRect, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_OWNERDRAW,
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, LoadCursorW, MessageBoxW,
-    RegisterClassW, SendMessageW, SetForegroundWindow, SetWindowTextW, ShowWindow, SW_SHOW,
-    WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORSTATIC, WM_CTLCOLOREDIT, WM_DESTROY,
-    WM_DRAWITEM, WM_ERASEBKGND,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect,
+    LoadCursorW, MessageBoxW, RegisterClassW, SendMessageW, SetForegroundWindow,
+    SetWindowTextW, ShowWindow, SW_SHOW, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CREATE,
+    WM_CTLCOLORSTATIC, WM_CTLCOLOREDIT, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_PAINT,
     BM_CLICK, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_SYSKEYDOWN, WS_GROUP,
     WS_CAPTION, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
     WNDCLASSW, IDC_ARROW,
@@ -43,9 +48,18 @@ const RD_DARK: u32 = 9;
 const RD_SYSTEM: u32 = 10;
 const ST_HIDE: u32 = 11;
 const ST_AUTO: u32 = 12;
+const ST_TITLE: u32 = 13;
+const ST_TAG: u32 = 14;
 const SUB_CAPTURE: usize = 10;
 const SUB_SBTN: usize = 11;
 const SS_NOTIFY: u32 = 0x0100; // windows-sys 0.52 缺失
+
+// 品牌 banner：设置窗口顶部的 logo（assets/brand/settings-logo.bin，
+// 由 make_settings_logo.py 从 symbol-color.svg 离线生成——预乘 BGRA、自底向上，
+// 运行时 CreateDIBSection 后 AlphaBlend 直接合成，无解码、零运行时依赖）
+const LOGO_SIZE: i32 = 42;
+const BANNER_SHIFT: i32 = 56;
+static LOGO_BIN: &[u8] = include_bytes!("../assets/brand/settings-logo.bin");
 
 struct SettingsState {
     hwnd: HWND,
@@ -55,6 +69,9 @@ struct SettingsState {
     hk_mods: u32,
     hk_vk: u32,
     font: isize,
+    font_title: isize,
+    logo_dc: isize,
+    logo_bmp: isize,
     hover_save: bool,
     hover_cancel: bool,
     down_save: bool,
@@ -167,7 +184,7 @@ pub fn open(owner: HWND) {
         RegisterClassW(&wc);
 
         let style = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU) as u32;
-        let mut rc = RECT { left: 0, top: 0, right: 360, bottom: 252 };
+        let mut rc = RECT { left: 0, top: 0, right: 360, bottom: 252 + BANNER_SHIFT };
         AdjustWindowRect(&mut rc, style, 0);
         let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
 
@@ -250,52 +267,98 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             };
 
             let font = util::create_ui_font(false);
-            let st_label = mk("STATIC", "全局热键：", WS_CHILD | WS_VISIBLE, 14, 16, 62, 18, ST_LABEL);
-            let ed = mk("EDIT", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 80, 12, 172, 24, ED_HOTKEY);
-            let st_theme = mk("STATIC", "主题：", WS_CHILD | WS_VISIBLE, 14, 50, 62, 18, ST_LABEL + 100);
-            let rd_light = mk("BUTTON", "浅色", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32 | WS_GROUP as u32, 80, 48, 56, 20, RD_LIGHT);
-            let rd_dark = mk("BUTTON", "暗色", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 140, 48, 56, 20, RD_DARK);
-            let rd_system = mk("BUTTON", "跟随系统", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 200, 48, 84, 20, RD_SYSTEM);
+
+            // 品牌 banner：logo 位图（DIB）+ 标题/标语
+            let face = wide(crate::util::UI_FONT_FACE);
+            let font_title = CreateFontW(
+                -17, 0, 0, 0, 600, 0, 0, 0, 0, 0, 0, 5, 0,
+                face.as_ptr(),
+            );
+            let mut logo_dc = CreateCompatibleDC(0);
+            let mut logo_bmp: isize = 0;
+            if logo_dc != 0 {
+                let mut bmi: BITMAPINFO = std::mem::zeroed();
+                bmi.bmiHeader = BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: LOGO_SIZE,
+                    biHeight: LOGO_SIZE, // 正高度 = 自底向上，与 .bin 排布一致
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB,
+                    ..std::mem::zeroed()
+                };
+                let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+                let screen_dc = GetDC(hwnd);
+                logo_bmp = CreateDIBSection(
+                    screen_dc,
+                    &bmi,
+                    DIB_RGB_COLORS,
+                    &mut bits,
+                    0,
+                    0,
+                );
+                ReleaseDC(hwnd, screen_dc);
+                if logo_bmp != 0 && !bits.is_null() && LOGO_BIN.len() == (LOGO_SIZE * LOGO_SIZE * 4) as usize {
+                    std::ptr::copy_nonoverlapping(LOGO_BIN.as_ptr(), bits as *mut u8, LOGO_BIN.len());
+                    SelectObject(logo_dc, logo_bmp);
+                } else {
+                    DeleteDC(logo_dc);
+                    logo_dc = 0;
+                }
+            }
+
+            let st_title = mk("STATIC", "MiniNotes", WS_CHILD | WS_VISIBLE, 66, 12, 160, 24, ST_TITLE);
+            let tag_text = format!("托盘常驻的极简便签 · v{}", env!("CARGO_PKG_VERSION"));
+            let st_tag = mk("STATIC", &tag_text, WS_CHILD | WS_VISIBLE, 66, 38, 270, 16, ST_TAG);
+
+            let st_label = mk("STATIC", "全局热键：", WS_CHILD | WS_VISIBLE, 14, 16 + BANNER_SHIFT, 62, 18, ST_LABEL);
+            let ed = mk("EDIT", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 80, 12 + BANNER_SHIFT, 172, 24, ED_HOTKEY);
+            let st_theme = mk("STATIC", "主题：", WS_CHILD | WS_VISIBLE, 14, 50 + BANNER_SHIFT, 62, 18, ST_LABEL + 100);
+            let rd_light = mk("BUTTON", "浅色", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32 | WS_GROUP as u32, 80, 48 + BANNER_SHIFT, 56, 20, RD_LIGHT);
+            let rd_dark = mk("BUTTON", "暗色", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 140, 48 + BANNER_SHIFT, 56, 20, RD_DARK);
+            let rd_system = mk("BUTTON", "跟随系统", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 200, 48 + BANNER_SHIFT, 84, 20, RD_SYSTEM);
             // checkbox 文字由 STATIC 承担：DarkMode_Explorer 主题下系统自绘的
             // checkbox 文字颜色不受 WM_CTLCOLORSTATIC 控制，会隐入深色背景
             let chk_hide = mk(
                 "BUTTON",
                 "",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX as u32,
-                14, 82, 18, 18,
+                14, 82 + BANNER_SHIFT, 18, 18,
                 CHK_AUTOHIDE,
             );
             let st_hide = mk(
                 "STATIC",
                 "失焦时自动隐藏窗口",
                 WS_CHILD | WS_VISIBLE | SS_NOTIFY,
-                38, 83, 220, 18,
+                38, 83 + BANNER_SHIFT, 220, 18,
                 ST_HIDE,
             );
             let chk_auto = mk(
                 "BUTTON",
                 "",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX as u32,
-                14, 108, 18, 18,
+                14, 108 + BANNER_SHIFT, 18, 18,
                 CHK_AUTOSTART,
             );
             let st_auto = mk(
                 "STATIC",
                 "开机时自动启动 MiniNotes",
                 WS_CHILD | WS_VISIBLE | SS_NOTIFY,
-                38, 109, 220, 18,
+                38, 109 + BANNER_SHIFT, 220, 18,
                 ST_AUTO,
             );
             let st_hint = mk(
                 "STATIC",
                 "点击热键输入框后按下组合键即可录入（如 Alt+N）。\n热键需包含 Ctrl / Alt / Shift / Win 至少一个修饰键。",
                 WS_CHILD | WS_VISIBLE,
-                14, 136, 336, 36,
+                14, 136 + BANNER_SHIFT, 336, 36,
                 ST_HINT,
             );
-            let btn_save = mk("BUTTON", "保存", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 180, 208, 80, 30, BTN_SAVE);
-            let btn_cancel = mk("BUTTON", "取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 268, 208, 80, 30, BTN_CANCEL);
+            let btn_save = mk("BUTTON", "保存", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 180, 208 + BANNER_SHIFT, 80, 30, BTN_SAVE);
+            let btn_cancel = mk("BUTTON", "取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 268, 208 + BANNER_SHIFT, 80, 30, BTN_CANCEL);
 
+            util::apply_font(st_title, font_title);
+            util::apply_font(st_tag, font);
             for h in [st_label, ed, st_theme, rd_light, rd_dark, rd_system, chk_hide, st_hide, chk_auto, st_auto, st_hint, btn_save, btn_cancel] {
                 util::apply_font(h, font);
             }
@@ -325,6 +388,9 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                     hk_mods: m,
                     hk_vk: v,
                     font,
+                    font_title,
+                    logo_dc,
+                    logo_bmp,
                     hover_save: false,
                     hover_cancel: false,
                     down_save: false,
@@ -343,15 +409,37 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             });
             1
         }
+        WM_PAINT => {
+            // 窗口本体只画 banner 的 logo；其余区域由 WM_ERASEBKGND 铺底、控件自绘
+            if !st_ready() {
+                return DefWindowProcW(hwnd, msg, wp, lp);
+            }
+            with_st(|s| unsafe {
+                let mut ps: PAINTSTRUCT = std::mem::zeroed();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                if s.logo_dc != 0 {
+                    let bf = BLENDFUNCTION {
+                        BlendOp: AC_SRC_OVER as u8,
+                        BlendFlags: 0,
+                        SourceConstantAlpha: 255,
+                        AlphaFormat: AC_SRC_ALPHA as u8,
+                    };
+                    AlphaBlend(hdc, 14, 10, LOGO_SIZE, LOGO_SIZE, s.logo_dc, 0, 0, LOGO_SIZE, LOGO_SIZE, bf);
+                }
+                EndPaint(hwnd, &ps);
+            });
+            0
+        }
         WM_CTLCOLORSTATIC => {
             let hdc = wp as isize;
             with_app(|app| unsafe {
                 let p = theme::palette(app.dark);
                 let ctl = lp as HWND;
-                let is_hint =
-                    windows_sys::Win32::UI::WindowsAndMessaging::GetDlgCtrlID(ctl) == ST_HINT as i32;
+                let id = windows_sys::Win32::UI::WindowsAndMessaging::GetDlgCtrlID(ctl);
+                // 提示语与 banner 标语用次级文字色
+                let sec = id == ST_HINT as i32 || id == ST_TAG as i32;
                 windows_sys::Win32::Graphics::Gdi::SetBkColor(hdc, p.window_bg);
-                windows_sys::Win32::Graphics::Gdi::SetTextColor(hdc, if is_hint { p.text_sec } else { p.text });
+                windows_sys::Win32::Graphics::Gdi::SetTextColor(hdc, if sec { p.text_sec } else { p.text });
                 app.brushes.window_bg
             })
         }
@@ -416,6 +504,13 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 EnableWindow(s.owner, 1);
                 SetForegroundWindow(s.owner);
                 util::destroy_font(s.font);
+                util::destroy_font(s.font_title);
+                if s.logo_bmp != 0 {
+                    DeleteObject(s.logo_bmp);
+                }
+                if s.logo_dc != 0 {
+                    DeleteDC(s.logo_dc);
+                }
             });
             ST.with(|s| *s.borrow_mut() = None);
             with_app(|app| app.settings_open = false);

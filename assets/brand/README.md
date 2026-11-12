@@ -14,6 +14,8 @@ Logo 设计源文件。配色：便签黄 `#FFC53D` · 折角琥珀 `#E8A02B` ·
 | `lockup-horizontal.svg` + `.png` | 横版组合 | README 头图、文档页眉 |
 | `lockup-stacked.svg` | 竖版组合 | 正方形场合 |
 | `lockup-on-dark.svg` + `.png` | 暗底全白横版 | GitHub 深色模式（`<picture>` 切换）、深色背景 |
+| `settings-logo.bin` | 42×42 预乘 BGRA 像素（自底向上） | 设置窗口 banner，运行时 `CreateDIBSection + AlphaBlend` 直接合成 |
+| `make_settings_logo.py` | `.bin` 生成脚本（PNG → 预乘 BGRA） | 改 logo 后重新生成 `.bin` 用 |
 
 ## 重新生成 assets/icon.ico
 
