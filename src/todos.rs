@@ -228,14 +228,9 @@ pub fn on_custom_draw(app: &App, nm: &NMLVCUSTOMDRAW) -> LRESULT {
         let lv = nm.nmcd.hdr.hwndFrom;
         match nm.nmcd.dwDrawStage {
             CDDS_PREPAINT => {
-                // 整个客户区先铺窗口底色：主题列表自身的底色与窗口底色存在色差，
-                // 透出来会像一块凸出的面板；铺平后行底/空区与窗口完全一致
-                let p = theme::palette(app.dark);
-                let mut full = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-                windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(lv, &mut full);
-                let b = CreateSolidBrush(p.window_bg);
-                FillRect(nm.nmcd.hdc, &full, b);
-                DeleteObject(b);
+                // 不在这里铺底！局部重绘（如勾选切换 LVM_REDRAWITEMS 只重绘单行）时
+                // 此 DC 无裁剪，整客户区填充会把未重绘的行全部擦没。
+                // 底色匹配交给 WM_ERASEBKGND（子类接管，带裁剪）+ 每行行底填充
                 if lv_count(lv) == 0 {
                     CDRF_NOTIFYPOSTPAINT as LRESULT
                 } else {
@@ -270,6 +265,11 @@ pub fn on_custom_draw(app: &App, nm: &NMLVCUSTOMDRAW) -> LRESULT {
                 let p = theme::palette(app.dark);
                 let i = nm.nmcd.dwItemSpec as i32;
                 let rc = lv_item_rect(lv, i);
+                // 行底铺窗口底色：主题控件在 ITEM_PREPAINT 前画的主题行底与窗口底
+                // 存在色差（暗色下成"凸面板"），行内自填即可，且局部重绘自洽
+                let bg = CreateSolidBrush(p.window_bg);
+                FillRect(nm.nmcd.hdc, &rc, bg);
+                DeleteObject(bg);
                 let done = app.todos.get(idx).map(|t| t.done).unwrap_or(false);
 
                 let selected = {
