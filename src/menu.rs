@@ -487,9 +487,14 @@ unsafe extern "system" fn menu_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         }
         WM_CAPTURECHANGED => {
             // 用户点击了其他线程的窗口：系统强制收回捕获（点击照常送达对方窗口），
-            // 我们从此收不到任何鼠标消息——必须自行退出，否则菜单永远留在屏幕上
+            // 我们从此收不到任何鼠标消息——必须自行退出，否则菜单永远留在屏幕上。
+            // 注意 closing 守卫：自己 dismiss（点中菜单项）的销毁流程也会同步
+            // 产生这条消息，此时 result 已是选中命令，绝不能清零
             if menu_ready() {
                 menu_with(|m| {
+                    if m.closing {
+                        return;
+                    }
                     m.result = 0;
                     dismiss(m);
                 }, ());
