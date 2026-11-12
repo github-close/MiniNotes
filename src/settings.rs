@@ -26,6 +26,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_CTLCOLORSTATIC, WM_CTLCOLOREDIT, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_PAINT,
     BM_CLICK, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_SYSKEYDOWN, WS_GROUP,
     WS_CAPTION, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    ES_MULTILINE, WM_PASTE,
     WNDCLASSW, IDC_ARROW,
 };
 
@@ -57,6 +58,7 @@ const ST_RDS: u32 = 17;
 const SUB_CAPTURE: usize = 10;
 const SUB_SBTN: usize = 11;
 const SS_NOTIFY: u32 = 0x0100; // windows-sys 0.52 缺失
+const EM_SETRECT: u32 = 0x00B3; // windows-sys 0.52 缺失：设置 EDIT 格式矩形
 
 // 品牌 banner：设置窗口顶部的 logo（assets/brand/settings-logo.bin，
 // 由 make_settings_logo.py 从 symbol-color.svg 离线生成——预乘 BGRA、自底向上，
@@ -80,6 +82,9 @@ struct SettingsState {
     hover_cancel: bool,
     down_save: bool,
     down_cancel: bool,
+    // 打开设置时停用了全局热键（否则当前已注册的组合键会被系统拦截去切换主窗口，
+    // 输入框永远捕获不到最后那个主键）。关闭时按此标记恢复注册
+    hk_dismissed: bool,
 }
 
 thread_local! {
@@ -188,7 +193,7 @@ pub fn open(owner: HWND) {
         RegisterClassW(&wc);
 
         let style = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU) as u32;
-        let mut rc = RECT { left: 0, top: 0, right: 360, bottom: 252 + BANNER_SHIFT };
+        let mut rc = RECT { left: 0, top: 0, right: 360, bottom: 220 + BANNER_SHIFT };
         AdjustWindowRect(&mut rc, style, 0);
         let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
 
@@ -227,7 +232,13 @@ pub fn open(owner: HWND) {
         // 守卫必须先于 EnableWindow：禁用前台的主窗口会让系统立刻收回前台、
         // 主窗口收到 WM_ACTIVATE(0)，此时若 settings_open 还没置位，失焦隐藏
         // 会用旧配置把主窗口藏回托盘（关掉设置后看起来就是"窗口自己消失了"）
-        with_app(|app| app.settings_open = true);
+        with_app(|app| {
+            app.settings_open = true;
+            // 录入期间停用全局热键：已注册的组合键会被 RegisterHotKey 系统级拦截，
+            // 最后的主键到不了输入框（捕获停在半截），还会触发 toggle_main 把主窗口切走
+            hotkey::unregister(app.hwnd);
+            with_st(|s| s.hk_dismissed = true);
+        });
         EnableWindow(owner, 0);
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
@@ -313,56 +324,57 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             let st_tag = mk("STATIC", &tag_text, WS_CHILD | WS_VISIBLE, 66, 38, 270, 16, ST_TAG);
 
             let st_label = mk("STATIC", "全局热键：", WS_CHILD | WS_VISIBLE, 14, 16 + BANNER_SHIFT, 62, 18, ST_LABEL);
-            let ed = mk("EDIT", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 80, 12 + BANNER_SHIFT, 172, 24, ED_HOTKEY);
-            let st_theme = mk("STATIC", "主题：", WS_CHILD | WS_VISIBLE, 14, 50 + BANNER_SHIFT, 62, 18, ST_LABEL + 100);
+            let ed = mk("EDIT", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE as u32, 80, 12 + BANNER_SHIFT, 172, 24, ED_HOTKEY);
+            // 输入说明紧跟热键输入框，而不是挂在最底部
+            let st_hint = mk(
+                "STATIC",
+                "点击热键输入框后按下组合键即可录入（如 Alt+N）。\n热键需包含 Ctrl / Alt / Shift / Win 至少一个修饰键。",
+                WS_CHILD | WS_VISIBLE,
+                14, 42 + BANNER_SHIFT, 336, 36,
+                ST_HINT,
+            );
+            let st_theme = mk("STATIC", "主题：", WS_CHILD | WS_VISIBLE, 14, 88 + BANNER_SHIFT, 62, 18, ST_LABEL + 100);
             // 单选钮只留圆圈、文字由 STATIC 承担：系统自绘的单选/复选文字颜色
             // 不受 WM_CTLCOLORSTATIC 控制，暗色下会隐入背景（与下方复选框同理）；
             // SS_NOTIFY 让点击文字也能切换对应单选钮
-            let rd_light = mk("BUTTON", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32 | WS_GROUP as u32, 80, 48 + BANNER_SHIFT, 18, 18, RD_LIGHT);
-            let rd_dark = mk("BUTTON", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 148, 48 + BANNER_SHIFT, 18, 18, RD_DARK);
-            let rd_system = mk("BUTTON", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 216, 48 + BANNER_SHIFT, 18, 18, RD_SYSTEM);
-            let st_rdl = mk("STATIC", "浅色", WS_CHILD | WS_VISIBLE | SS_NOTIFY, 102, 49 + BANNER_SHIFT, 40, 18, ST_RDL);
-            let st_rdd = mk("STATIC", "暗色", WS_CHILD | WS_VISIBLE | SS_NOTIFY, 170, 49 + BANNER_SHIFT, 40, 18, ST_RDD);
-            let st_rds = mk("STATIC", "跟随系统", WS_CHILD | WS_VISIBLE | SS_NOTIFY, 238, 49 + BANNER_SHIFT, 84, 18, ST_RDS);
+            let rd_light = mk("BUTTON", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32 | WS_GROUP as u32, 80, 86 + BANNER_SHIFT, 18, 18, RD_LIGHT);
+            let rd_dark = mk("BUTTON", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 148, 86 + BANNER_SHIFT, 18, 18, RD_DARK);
+            let rd_system = mk("BUTTON", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 216, 86 + BANNER_SHIFT, 18, 18, RD_SYSTEM);
+            let st_rdl = mk("STATIC", "浅色", WS_CHILD | WS_VISIBLE | SS_NOTIFY, 102, 87 + BANNER_SHIFT, 40, 18, ST_RDL);
+            let st_rdd = mk("STATIC", "暗色", WS_CHILD | WS_VISIBLE | SS_NOTIFY, 170, 87 + BANNER_SHIFT, 40, 18, ST_RDD);
+            let st_rds = mk("STATIC", "跟随系统", WS_CHILD | WS_VISIBLE | SS_NOTIFY, 238, 87 + BANNER_SHIFT, 84, 18, ST_RDS);
             // checkbox 文字由 STATIC 承担：DarkMode_Explorer 主题下系统自绘的
             // checkbox 文字颜色不受 WM_CTLCOLORSTATIC 控制，会隐入深色背景
             let chk_hide = mk(
                 "BUTTON",
                 "",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX as u32,
-                14, 82 + BANNER_SHIFT, 18, 18,
+                14, 118 + BANNER_SHIFT, 18, 18,
                 CHK_AUTOHIDE,
             );
             let st_hide = mk(
                 "STATIC",
                 "失焦时自动隐藏窗口",
                 WS_CHILD | WS_VISIBLE | SS_NOTIFY,
-                38, 83 + BANNER_SHIFT, 220, 18,
+                38, 119 + BANNER_SHIFT, 220, 18,
                 ST_HIDE,
             );
             let chk_auto = mk(
                 "BUTTON",
                 "",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX as u32,
-                14, 108 + BANNER_SHIFT, 18, 18,
+                14, 144 + BANNER_SHIFT, 18, 18,
                 CHK_AUTOSTART,
             );
             let st_auto = mk(
                 "STATIC",
                 "开机时自动启动 MiniNotes",
                 WS_CHILD | WS_VISIBLE | SS_NOTIFY,
-                38, 109 + BANNER_SHIFT, 220, 18,
+                38, 145 + BANNER_SHIFT, 220, 18,
                 ST_AUTO,
             );
-            let st_hint = mk(
-                "STATIC",
-                "点击热键输入框后按下组合键即可录入（如 Alt+N）。\n热键需包含 Ctrl / Alt / Shift / Win 至少一个修饰键。",
-                WS_CHILD | WS_VISIBLE,
-                14, 136 + BANNER_SHIFT, 336, 36,
-                ST_HINT,
-            );
-            let btn_save = mk("BUTTON", "保存", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 180, 208 + BANNER_SHIFT, 80, 30, BTN_SAVE);
-            let btn_cancel = mk("BUTTON", "取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 268, 208 + BANNER_SHIFT, 80, 30, BTN_CANCEL);
+            let btn_save = mk("BUTTON", "保存", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 180, 176 + BANNER_SHIFT, 80, 30, BTN_SAVE);
+            let btn_cancel = mk("BUTTON", "取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 268, 176 + BANNER_SHIFT, 80, 30, BTN_CANCEL);
 
             util::apply_font(st_title, font_title);
             util::apply_font(st_tag, font);
@@ -377,6 +389,22 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             }
 
             SetWindowTextW(ed, wide(&hotkey::text(m, v)).as_ptr());
+            // 输入框文字垂直居中：单行 EDIT 永远在顶部画文本，框体越高下方空得越多；
+            // EM_SETRECT 只对多行 EDIT 生效，故以 ES_MULTILINE 创建后把格式矩形
+            // 垂直居中（capture_proc 已吞掉全部字符输入与粘贴，不会真的成为多行）。
+            // 注意必须在 WM_SETFONT 之后发送：设置字体会重置格式矩形
+            unsafe {
+                let mut crc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(ed, &mut crc);
+                let line_h = util::font_line_height(font);
+                let fr = RECT {
+                    left: 2,
+                    top: (crc.bottom - line_h) / 2,
+                    right: crc.right - 2,
+                    bottom: crc.bottom,
+                };
+                SendMessageW(ed, EM_SETRECT, 0, &fr as *const RECT as isize);
+            }
             send_checked(rd_light, theme_mode == "light");
             send_checked(rd_dark, theme_mode == "dark");
             send_checked(rd_system, theme_mode == "system");
@@ -402,6 +430,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                     hover_cancel: false,
                     down_save: false,
                     down_cancel: false,
+                    hk_dismissed: false,
                 })
             });
             0
@@ -514,6 +543,22 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
         }
         WM_DESTROY => {
             with_st(|s| unsafe {
+                // 恢复全局热键（录入期间已停用，见 open）。取消 / 保存同组合键 /
+                // 保存新组合键三条路统一按 cfg 恢复：保存新组合时 apply 已把 cfg
+                // 更新为新值并注册，这里重注册等价于幂等恢复
+                if s.hk_dismissed {
+                    with_app(|app| {
+                        hotkey::unregister(app.hwnd);
+                        if !hotkey::register(app.hwnd, app.cfg.hotkey_mods, app.cfg.hotkey_vk) {
+                            let hk = hotkey::text(app.cfg.hotkey_mods, app.cfg.hotkey_vk);
+                            crate::tray::notify(
+                                app.hwnd,
+                                "MiniNotes 热键恢复失败",
+                                &format!("热键 {} 重新注册失败，可能已被其他程序占用，可左键点击托盘图标唤起。", hk),
+                            );
+                        }
+                    });
+                }
                 EnableWindow(s.owner, 1);
                 if windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(s.owner) != 0 {
                     SetForegroundWindow(s.owner);
@@ -685,6 +730,9 @@ unsafe extern "system" fn capture_proc(
     }
     if msg == WM_CHAR {
         return 1; // 吞掉字符输入
+    }
+    if msg == WM_PASTE {
+        return 1; // 阻止右键粘贴：热键只允许键盘录入，且换行会破坏多行化的显示
     }
     DefSubclassProc(hwnd, msg, wp, lp)
 }
