@@ -12,7 +12,7 @@ mod util;
 mod window;
 
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND};
-use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, FindWindowW, GetMessageW, LoadIconW, MSG, SendMessageW, TranslateMessage,
@@ -35,8 +35,6 @@ fn main() {
             return;
         }
 
-        // RichEdit 4.1 (msftedit.dll)
-        LoadLibraryW(wide("MSFTEDIT.DLL").as_ptr());
         window::init_common_controls();
         window::init_gdiplus();
 

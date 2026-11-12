@@ -9,7 +9,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_NULL,
 };
 
-use crate::util::{from_wide, wide};
+use crate::util::wide;
 
 /// 托盘回调消息（老式版本：lParam = 鼠标消息）
 pub const TRAY_CB: u32 = WM_APP + 1;
@@ -94,10 +94,4 @@ pub fn show_menu(hwnd: HWND, autostart_on: bool) -> u32 {
         DestroyMenu(menu);
         cmd
     }
-}
-
-/// 忽略：预留给后续扩展（读取提示文本）
-#[allow(dead_code)]
-pub fn tip_of(nid: &NOTIFYICONDATAW) -> String {
-    from_wide(&nid.szTip)
 }
