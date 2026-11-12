@@ -49,6 +49,7 @@ pub struct Palette {
     pub surface2: COLORREF,      // 输入框/次级按钮底
     pub hover: COLORREF,         // 悬停底
     pub hairline: COLORREF,      // 1px 分隔线
+    pub edge: COLORREF,          // 窗口外缘 1px 描边（无边框窗浮在相近色内容上勾出边界）
     pub text: COLORREF,          // 主文字
     pub text_sec: COLORREF,      // 次级文字
     pub text_disabled: COLORREF, // 完成态文字
@@ -72,6 +73,7 @@ pub const LIGHT: Palette = Palette {
     surface2: rgb(0xF2, 0xF4, 0xF7),
     hover: rgb(0xEC, 0xEF, 0xF3),
     hairline: rgb(0xE4, 0xE7, 0xEB),
+    edge: rgb(0xC9, 0xCE, 0xD4),
     text: rgb(0x1A, 0x1D, 0x21),
     text_sec: rgb(0x6B, 0x72, 0x80),
     text_disabled: rgb(0xA3, 0xAA, 0xB3),
@@ -90,6 +92,7 @@ pub const DARK: Palette = Palette {
     surface2: rgb(0x2A, 0x2D, 0x32),
     hover: rgb(0x31, 0x35, 0x3B),
     hairline: rgb(0x34, 0x38, 0x3D),
+    edge: rgb(0x40, 0x45, 0x4B),
     text: rgb(0xE8, 0xEA, 0xED),
     text_sec: rgb(0x9A, 0xA0, 0xA6),
     text_disabled: rgb(0x60, 0x65, 0x6B),

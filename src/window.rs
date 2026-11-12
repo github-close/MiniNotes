@@ -769,6 +769,15 @@ unsafe fn paint(hwnd: HWND) {
         FillRect(mem, &RECT { left: 0, top: 0, right: w, bottom: h }, bg_brush);
         DeleteObject(bg_brush);
 
+        // 窗口外缘 1px 描边：无边框窗的浅色底浮在浅色内容（或暗色浮深色）上时，
+        // 仅靠 DWM 阴影分不出边界，用一圈细线勾出窗口轮廓
+        let edge_brush = CreateSolidBrush(p.edge);
+        FillRect(mem, &RECT { left: 0, top: 0, right: w, bottom: 1 }, edge_brush);
+        FillRect(mem, &RECT { left: 0, top: h - 1, right: w, bottom: h }, edge_brush);
+        FillRect(mem, &RECT { left: 0, top: 0, right: 1, bottom: h }, edge_brush);
+        FillRect(mem, &RECT { left: w - 1, top: 0, right: w, bottom: h }, edge_brush);
+        DeleteObject(edge_brush);
+
         // -- 标题栏 --
         DrawIconEx(mem, 12, 10, app.hicon, 16, 16, 0, 0, DI_NORMAL);
         SetBkMode(mem, TRANSPARENT as i32);
