@@ -8,7 +8,7 @@ use windows_sys::Win32::UI::Controls::{
     ImageList_Draw, LVM_GETCOLUMNWIDTH, LVM_GETITEMCOUNT, LVM_GETITEMRECT,
     LVM_GETITEMSTATE, LVM_REDRAWITEMS, LVM_SETITEMW, LVIF_IMAGE, LVIF_TEXT, LVITEMW,
     LVM_DELETEALLITEMS, LVM_GETNEXTITEM, LVM_INSERTITEMW, LVIS_SELECTED,
-    LVNI_SELECTED, NMITEMACTIVATE, NMLVCUSTOMDRAW, NMLISTVIEW, CDDS_ITEMPREPAINT,
+    LVNI_SELECTED, NMITEMACTIVATE, NMLVCUSTOMDRAW, CDDS_ITEMPREPAINT,
     CDDS_POSTPAINT, CDDS_PREPAINT, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYPOSTPAINT,
     CDRF_SKIPDEFAULT,
 };
@@ -38,10 +38,21 @@ fn file_path() -> std::path::PathBuf {
 }
 
 pub fn load() -> Vec<TodoItem> {
-    std::fs::read_to_string(file_path())
+    let path = file_path();
+    if !path.exists() {
+        return Vec::new();
+    }
+    // 读取/解析失败时先把原文件改名备份：否则下一次保存会直接用空列表覆盖掉用户数据
+    let parsed = std::fs::read_to_string(&path)
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .and_then(|s| serde_json::from_str::<Vec<TodoItem>>(&s).ok());
+    match parsed {
+        Some(items) => items,
+        None => {
+            let _ = std::fs::rename(&path, path.with_extension("json.bak"));
+            Vec::new()
+        }
+    }
 }
 
 pub fn save(items: &[TodoItem]) {
@@ -106,7 +117,7 @@ pub fn rebuild(app: &mut App) {
 }
 
 pub fn add_from_input(app: &mut App) {
-    // 输入框是多行 EDIT（用于光标垂直居中），粘贴进来的换行压成空格
+    // 输入框是单行 EDIT，粘贴进来的换行压成空格
     let text = get_text(app.todo_input)
         .replace(['\r', '\n'], " ")
         .trim()
@@ -196,9 +207,6 @@ pub fn on_click(app: &mut App, nm: &NMITEMACTIVATE) -> bool {
         false
     }
 }
-
-/// 旧的勾选状态同步（系统勾选框已移除，保留空实现以兼容消息流）
-pub fn on_item_changed(_app: &mut App, _nm: &NMLISTVIEW) {}
 
 /// 应用待办编辑（自管理重命名编辑框提交时调用）。返回 true = 已应用
 pub fn apply_edit(app: &mut App, idx: usize, new_text: &str) -> bool {

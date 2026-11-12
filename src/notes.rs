@@ -369,16 +369,18 @@ pub fn delete_selected(app: &mut App) {
         app.cur_note = None;
         app.note_dirty = false;
     }
-    // 选中替代项
-    let next = if app.notes.is_empty() {
+    // 选中替代项：先记下文件名，refresh 会按 mtime 重排列表，用索引会指错行
+    let next_name = if app.notes.is_empty() {
         None
     } else {
-        Some(idx.min(app.notes.len() as i32 - 1) as usize)
+        let i = (idx as usize).min(app.notes.len() - 1);
+        Some(app.notes[i].filename.clone())
     };
     refresh(app);
-    match next {
+    match next_name.and_then(|n| app.notes.iter().position(|m| m.filename == n)) {
         Some(i) => load_by_index(app, i),
         None => {
+            app.cur_note = None;
             app.suppress_notify = true;
             set_text(app.editor, "");
             app.suppress_notify = false;
@@ -413,7 +415,8 @@ pub fn apply_rename(app: &mut App, idx: usize, new_text: &str) -> bool {
     }
     let old = app.notes[idx].filename.clone();
     let new_name = format!("{}.{}", new_title, ext_of(&old));
-    if new_name != old && dir().join(&new_name).exists() {
+    // 仅大小写不同时目标就是自己（Windows 允许大小写改名），不能当重名处理
+    if !new_name.eq_ignore_ascii_case(&old) && dir().join(&new_name).exists() {
         let msg = wide(&format!("已存在名为「{new_title}」的笔记"));
         unsafe {
             MessageBoxW(app.hwnd, msg.as_ptr(), wide("重命名失败").as_ptr(), 0);

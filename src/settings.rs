@@ -199,6 +199,9 @@ pub fn open(owner: HWND) {
             GetModuleHandleW(std::ptr::null()),
             std::ptr::null(),
         );
+        if hwnd == 0 {
+            return; // 创建失败：不要禁用主窗口，否则再也点不动
+        }
         // 控件在 WM_CREATE 里就绪；此处只做模态化与显示
         EnableWindow(owner, 0);
         ShowWindow(hwnd, SW_SHOW);
@@ -612,18 +615,7 @@ fn apply(hwnd: HWND) {
             false
         }
     });
-    if !hk_ok {
-        unsafe {
-            MessageBoxW(
-                hwnd,
-                wide(&format!("热键 {} 注册失败，可能已被其他程序占用。", hotkey::text(m, v))).as_ptr(),
-                wide("热键冲突").as_ptr(),
-                0x30,
-            );
-        };
-        return;
-    }
-
+    // 无论热键是否注册成功，其余设置都照常保存：一次热键冲突不该把主题/自启等一起丢掉
     autostart_set(autost);
     with_app(|app| {
         app.cfg.auto_hide = auto_hide;
@@ -632,6 +624,20 @@ fn apply(hwnd: HWND) {
         crate::config::save(&app.cfg);
         crate::window::apply_theme(app);
     });
+    if !hk_ok {
+        unsafe {
+            MessageBoxW(
+                hwnd,
+                wide(&format!(
+                    "热键 {} 注册失败，可能已被其他程序占用，已保留原热键；其余设置已保存。",
+                    hotkey::text(m, v)
+                ))
+                .as_ptr(),
+                wide("热键冲突").as_ptr(),
+                0x30,
+            );
+        };
+    }
     unsafe { DestroyWindow(hwnd) };
 }
 

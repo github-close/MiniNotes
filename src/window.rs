@@ -72,6 +72,7 @@ pub const ID_EDITOR: u32 = 303;
 pub const TIMER_SAVE: usize = 1;
 
 pub const TAB_TODO: usize = 0;
+const TAB_NOTE: usize = 1;
 
 const SUB_EDITOR: usize = 1;
 const SUB_TODO_INPUT: usize = 2;
@@ -90,7 +91,7 @@ const M_TODO_CLEAR: u32 = 2103;
 
 const VK_N: u32 = 0x4E;
 
-// RichEdit 本地消息常量（windows-sys 0.52 缺失）
+// EDIT 控件常用消息（windows-sys 0.52 缺失）
 const EM_GETRECT: u32 = 0x00B2;
 const EM_SETRECT: u32 = 0x00B3;
 const EM_SETLIMITTEXT: u32 = 0x00C5;
@@ -260,41 +261,42 @@ fn make_checkbox_imagelist(dark: bool) -> isize {
     unsafe {
         let himl = ImageList_Create(24, 26, ILC_COLOR32, 3, 1);
         // 0 = 纯背景
-        ImageList_Add(himl, make_icon_dib(|_, _| p.window_bg), 0);
+        add_icon(himl, |_, _| p.window_bg);
         // 1 = 未完成：圆圈描边
-        ImageList_Add(
-            himl,
-            make_icon_dib(|x, y| {
-                let d = ((x as f32 + 0.5) - 12.0).hypot((y as f32 + 0.5) - 13.0);
-                if d > 5.2 && d < 6.4 {
-                    p.text_disabled
-                } else {
-                    p.window_bg
-                }
-            }),
-            0,
-        );
+        add_icon(himl, |x, y| {
+            let d = ((x as f32 + 0.5) - 12.0).hypot((y as f32 + 0.5) - 13.0);
+            if d > 5.2 && d < 6.4 {
+                p.text_disabled
+            } else {
+                p.window_bg
+            }
+        });
         // 2 = 完成：实心圆 + 白色对勾
-        ImageList_Add(
-            himl,
-            make_icon_dib(|x, y| {
-                let d = ((x as f32 + 0.5) - 12.0).hypot((y as f32 + 0.5) - 13.0);
-                if d < 6.8 {
-                    // 对勾两段线：像素接近线段即命中
-                    let da = seg_dist(x as f32 + 0.5, y as f32 + 0.5, 8.8, 13.2, 11.0, 16.0);
-                    let db = seg_dist(x as f32 + 0.5, y as f32 + 0.5, 11.0, 16.0, 15.4, 9.4);
-                    if da.min(db) < 1.05 {
-                        p.on_accent
-                    } else {
-                        p.accent
-                    }
+        add_icon(himl, |x, y| {
+            let d = ((x as f32 + 0.5) - 12.0).hypot((y as f32 + 0.5) - 13.0);
+            if d < 6.8 {
+                // 对勾两段线：像素接近线段即命中
+                let da = seg_dist(x as f32 + 0.5, y as f32 + 0.5, 8.8, 13.2, 11.0, 16.0);
+                let db = seg_dist(x as f32 + 0.5, y as f32 + 0.5, 11.0, 16.0, 15.4, 9.4);
+                if da.min(db) < 1.05 {
+                    p.on_accent
                 } else {
-                    p.window_bg
+                    p.accent
                 }
-            }),
-            0,
-        );
+            } else {
+                p.window_bg
+            }
+        });
         himl
+    }
+}
+
+/// 生成一张图标并挂进 ImageList。ImageList_Add 只拷贝位图，DIB 用完必须自己释放
+fn add_icon(himl: isize, fill: impl Fn(i32, i32) -> COLORREF) {
+    unsafe {
+        let hb = make_icon_dib(fill);
+        ImageList_Add(himl, hb, 0);
+        DeleteObject(hb);
     }
 }
 
@@ -513,10 +515,15 @@ pub fn apply_theme(app: &mut App) {
 
         // 列表：背景 / 文字 / 文字底透明；内联编辑与滚动条跟随系统暗色主题
         let theme_name = if dark { "DarkMode_Explorer" } else { "Explorer" };
+        let old_himl = app.himl;
         let himl = make_checkbox_imagelist(dark);
         app.himl = himl;
         SendMessageW(app.todo_list, LVM_SETIMAGELIST, LVSIL_SMALL as usize, himl);
         SendMessageW(app.note_list, LVM_SETIMAGELIST, LVSIL_SMALL as usize, himl);
+        // 两个列表都换上新图列表后旧的就不再被引用，销毁掉，避免每次切主题漏一份
+        if old_himl != 0 {
+            windows_sys::Win32::UI::Controls::ImageList_Destroy(old_himl);
+        }
         for lv in [app.todo_list, app.note_list] {
             // 不再发送 LVM_SETBKCOLOR：实测（Win10 19045 comctl32 6.10）发送过该消息后，
             // 内联重命名 LVM_EDITLABELW 会在 comctl32 内部触发访问违例（进程闪退）。
@@ -594,6 +601,17 @@ fn layout(app: &mut App) {
         SendMessageW(app.note_list, windows_sys::Win32::UI::Controls::LVM_SETCOLUMNWIDTH, 0, 156);
         editor_set_margin(app.editor, 10, 8);
     }
+}
+
+/// 从任意位置新建笔记：先切到笔记页，否则用户看不到新建结果
+fn show_notes_and_create() {
+    show_main();
+    with_app(|app| {
+        if app.cur_tab != TAB_NOTE {
+            switch_tab(app, TAB_NOTE);
+        }
+        notes::create_note(app);
+    });
 }
 
 fn switch_tab(app: &mut App, idx: usize) {
@@ -1132,8 +1150,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
         MSG_NEW_NOTE => {
-            show_main();
-            with_app(notes::create_note);
+            show_notes_and_create();
             0
         }
         MSG_ADD_TODO => {
@@ -1217,10 +1234,6 @@ fn on_notify(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     });
                     0
                 }
-                LVN_ITEMCHANGED => {
-                    with_app(|app| todos::on_item_changed(app, &*(lp as *const NMLISTVIEW)));
-                    0
-                }
                 NM_DBLCLK => {
                     with_app(todos::begin_edit);
                     0
@@ -1281,8 +1294,7 @@ fn on_tray(hwnd: HWND, lp: LPARAM) -> LRESULT {
                 match tray::show_menu(hwnd, auto) {
                     tray::CMD_OPEN => show_main(),
                     tray::CMD_NEW_NOTE => {
-                        show_main();
-                        with_app(notes::create_note);
+                        show_notes_and_create();
                     }
                     tray::CMD_SETTINGS => settings::open(hwnd),
                     tray::CMD_AUTOSTART => {
@@ -1372,6 +1384,12 @@ unsafe extern "system" fn button_subclass(
     _id: usize,
     _d: usize,
 ) -> LRESULT {
+    // Esc 在按钮上同样隐藏窗口（与编辑器/输入框/列表保持一致）
+    if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp as u32 == VK_ESCAPE as u32 {
+        let root = GetAncestor(hwnd, GA_ROOT);
+        PostMessageW(root, MSG_ESC_HIDE, 0, 0);
+        return 1;
+    }
     match msg {
         // 禁止系统在 DRAWITEM 前擦底（暗色主题下表现为白色闪烁）
         WM_ERASEBKGND => return 1,
@@ -1475,12 +1493,20 @@ unsafe extern "system" fn child_subclass(
                 }
             }
             SUB_NOTE_LIST => {
+                if vk == VK_ESCAPE as u32 {
+                    PostMessageW(root, MSG_ESC_HIDE, 0, 0);
+                    return 1;
+                }
                 if vk == VK_DELETE as u32 {
                     PostMessageW(root, MSG_DEL_NOTE, 0, 0);
                     return 1;
                 }
             }
             SUB_TODO_LIST => {
+                if vk == VK_ESCAPE as u32 {
+                    PostMessageW(root, MSG_ESC_HIDE, 0, 0);
+                    return 1;
+                }
                 if vk == VK_DELETE as u32 {
                     PostMessageW(root, MSG_DEL_TODO, 0, 0);
                     return 1;
