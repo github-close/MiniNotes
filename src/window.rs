@@ -1538,6 +1538,17 @@ unsafe extern "system" fn child_subclass(
                 });
                 return brush;
             }
+            WM_COMMAND => {
+                // 重命名编辑框的 EN_CHANGE：多行 EDIT 改文本只失效插入跨度，
+                // 行首/行中键入（含 IME 上屏、退格）时右侧被推移的旧文字像素
+                // 不重绘，与新文字叠成花屏——粘贴路径已在 rename::paste_flattened
+                // 兜底，其余所有改动路径统一在此整框强制重绘
+                let code = ((wp as u32) >> 16) & 0xffff;
+                let cid = (wp as u32) & 0xffff;
+                if code == EN_CHANGE && cid == crate::rename::ID_RENAME_EDIT {
+                    unsafe { InvalidateRect(lp as HWND, std::ptr::null(), 0) };
+                }
+            }
             _ => {}
         }
     }
