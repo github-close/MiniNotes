@@ -27,6 +27,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     BM_CLICK, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_SYSKEYDOWN, WS_GROUP,
     WS_CAPTION, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
     ES_MULTILINE, WM_PASTE,
+    LoadImageW, GetSystemMetrics, IMAGE_ICON, LR_SHARED, WM_SETICON,
+    SM_CXICON, SM_CYICON, SM_CXSMICON, SM_CYSMICON,
     WNDCLASSW, IDC_ARROW,
 };
 
@@ -260,6 +262,21 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             if dark {
                 crate::theme::allow_dark_chrome(hwnd);
             }
+
+            // 标题栏图标：与托盘/主窗口同源的 logo（资源 ID=1）。小图标按系统
+            // 标题栏精确尺寸加载，避免大图缩放发虚；大图标供 Alt-Tab 等场景。
+            // LR_SHARED 共享句柄，无需 DestroyIcon
+            let hinst = GetModuleHandleW(std::ptr::null());
+            let icon_sm = LoadImageW(
+                hinst, 1usize as *const u16, IMAGE_ICON,
+                GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED,
+            );
+            let icon_big = LoadImageW(
+                hinst, 1usize as *const u16, IMAGE_ICON,
+                GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_SHARED,
+            );
+            SendMessageW(hwnd, WM_SETICON, 0, icon_sm);
+            SendMessageW(hwnd, WM_SETICON, 1, icon_big);
 
             let mk = |class: &str, text: &str, style: u32, x: i32, y: i32, w: i32, h: i32, id: u32| -> HWND {
                 CreateWindowExW(
