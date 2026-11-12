@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 256">
+  <title>MiniNotes · 横版组合 · 暗底全白</title>
+  <g transform="translate(16 41) scale(0.68)">
+    <path fill="#FFFFFF" fill-rule="evenodd" d="M70 56 H186 A14 14 0 0 1 200 70 V120 L120 200 H70 A14 14 0 0 1 56 184 V70 A14 14 0 0 1 70 56 Z M92 92 H172 A8 8 0 0 1 172 108 H92 A8 8 0 0 1 92 92 Z M92 124 H124 A8 8 0 0 1 124 140 H92 A8 8 0 0 1 92 124 Z"/>
+    <path fill="#FFFFFF" d="M127 200 L200 127 L200 186 A14 14 0 0 1 186 200 Z"/>
+  </g>
+  <g transform="translate(226 38) scale(0.72)" fill="none" stroke="#FFFFFF" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M13 200 V63 L72 145 L131 63 V200"/>
+    <g transform="translate(182 0)">
+      <path d="M13 103 V187"/>
+      <circle cx="13" cy="57" r="17" fill="#FFFFFF" stroke="none"/>
+    </g>
+    <path transform="translate(246 0)" d="M13 187 V116 Q13 103 46 103 Q79 103 79 116 V187"/>
+    <g transform="translate(376 0)">
+      <path d="M13 103 V187"/>
+      <circle cx="13" cy="57" r="17" fill="#FFFFFF" stroke="none"/>
+    </g>
+    <path transform="translate(440 0)" d="M13 187 V63 L137 187 V63"/>
+    <circle transform="translate(628 0)" cx="55" cy="145" r="42"/>
+    <g transform="translate(776 0)">
+      <path d="M40 80 V187"/>
+      <path d="M16 96 H82"/>
+    </g>
+    <path transform="translate(906 0)" d="M93 127 L17 127 M93 127 A42 42 0 1 0 76 181.4"/>
+    <path transform="translate(1048 0)" d="M26 106 C14 97 -10 94 -19 106 C-27 116 -28 136 -21 147 C-13 159 0 163 13 162 C24 161 27 167 26 174 C24 183 12 189 -2 188 C-14 187 -22 186 -26 184"/>
+  </g>
+</svg>

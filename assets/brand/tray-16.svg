@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <title>MiniNotes 托盘图标 16px</title>
+  <!-- 16px 优化:折角加大到可读比例,笔画像素对齐 -->
+  <path fill="#FFC53D" d="M3 1 H13 A2 2 0 0 1 15 3 V6 L6 15 H3 A2 2 0 0 1 1 13 V3 A2 2 0 0 1 3 1 Z"/>
+  <path fill="#E8A02B" d="M7.5 15 L15 7.5 V13 A2 2 0 0 1 13 15 Z"/>
+  <rect fill="#2B2419" x="4" y="4" width="7" height="2" rx="1"/>
+  <rect fill="#2B2419" x="4" y="7.5" width="4" height="2" rx="1"/>
+</svg>

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <title>MiniNotes · 表情变体</title>
+  <!-- 表情变体 · 彩色版:同形微倾 4°,大尺寸物料用 -->
+  <g transform="rotate(-4 128 128)">
+    <path fill="#FFC53D" d="M70 56 H186 A14 14 0 0 1 200 70 V120 L120 200 H70 A14 14 0 0 1 56 184 V70 A14 14 0 0 1 70 56 Z"/>
+    <path fill="#E8A02B" d="M127 200 L200 127 L200 186 A14 14 0 0 1 186 200 Z"/>
+    <rect fill="#2B2419" x="92" y="92" width="80" height="16" rx="8"/>
+    <rect fill="#2B2419" x="92" y="124" width="32" height="16" rx="8"/>
+  </g>
+</svg>

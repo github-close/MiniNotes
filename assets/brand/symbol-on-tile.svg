@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <title>MiniNotes app icon · 便签黄圆角砖</title>
+  <rect width="256" height="256" rx="56" fill="#FFC53D"/>
+  <g transform="translate(36 36) scale(0.72)">
+    <path fill="#FFFFFF" fill-rule="evenodd" d="M70 56 H186 A14 14 0 0 1 200 70 V120 L120 200 H70 A14 14 0 0 1 56 184 V70 A14 14 0 0 1 70 56 Z M92 92 H172 A8 8 0 0 1 172 108 H92 A8 8 0 0 1 92 92 Z M92 124 H124 A8 8 0 0 1 124 140 H92 A8 8 0 0 1 92 124 Z"/>
+    <path fill="#E8A02B" d="M127 200 L200 127 L200 186 A14 14 0 0 1 186 200 Z"/>
+  </g>
+</svg>
