@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 
 use windows_sys::Win32::Foundation::{HWND, LRESULT, LPARAM, POINT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{
+    AC_SRC_ALPHA, AC_SRC_OVER, AlphaBlend, BLENDFUNCTION, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, DIB_RGB_COLORS,
+};
 use windows_sys::Win32::UI::Controls::{
     CDDS_ITEMPREPAINT, CDDS_POSTPAINT, CDDS_PREPAINT, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW,
     CDRF_NOTIFYPOSTPAINT, LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS,
@@ -19,6 +23,7 @@ use crate::window::App;
 pub struct NoteMeta {
     pub filename: String,
     pub mtime: u64,
+    pub pinned: bool,
 }
 
 pub fn dir() -> PathBuf {
@@ -102,10 +107,80 @@ pub fn save_order_from_app(app: &App) {
     write_order(&names);
 }
 
+// ---------- 置顶 ----------
+
+/// 置顶文件：一行一个文件名。置顶的固定排在列表最前（组内仍按手动顺序）；
+/// 没记录到的一律视为未置顶
+fn pinned_file() -> std::path::PathBuf {
+    crate::util::data_dir().join("notes.pinned")
+}
+
+fn load_pinned() -> Vec<String> {
+    std::fs::read_to_string(pinned_file())
+        .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+fn write_pinned(names: &[String]) {
+    let mut s = names.join("\n");
+    if !s.is_empty() {
+        s.push('\n');
+    }
+    let _ = std::fs::write(pinned_file(), s);
+}
+
+/// 置顶区边界：app.notes 前缀里连续置顶的数量
+/// （refresh 的排序保证置顶笔记总在前缀，拖拽落点 clamp 与插入线取位都用它）
+pub fn pinned_count(app: &App) -> usize {
+    app.notes.iter().take_while(|m| m.pinned).count()
+}
+
+/// 当前列表选中项是否置顶（右键菜单文案用）
+pub fn selected_pinned(app: &App) -> bool {
+    let idx = lv_selected(app.note_list);
+    idx >= 0 && app.notes.get(idx as usize).is_some_and(|m| m.pinned)
+}
+
+/// 置顶 / 取消置顶当前选中的笔记。置顶：文件名插入 pinned 与顺序文件首位
+/// （跳到列表最顶，且「最新置顶的排最上」）；取消：仅移出 pinned，顺序位置
+/// 保留（自然落回未置顶区首位）
+pub fn toggle_pin(app: &mut App) {
+    let idx = lv_selected(app.note_list);
+    if idx < 0 || idx as usize >= app.notes.len() {
+        return;
+    }
+    let idx = idx as usize;
+    let filename = app.notes[idx].filename.clone();
+    let mut pins = load_pinned();
+    if app.notes[idx].pinned {
+        pins.retain(|n| n != &filename);
+    } else {
+        pins.retain(|n| n != &filename);
+        pins.insert(0, filename.clone());
+        let mut order = load_order();
+        order.retain(|n| n != &filename);
+        order.insert(0, filename.clone());
+        write_order(&order);
+    }
+    write_pinned(&pins);
+    refresh_keep(app, &filename);
+}
+
 /// 拖拽落地：把列表项 from 移动到 to，持久化顺序。编辑器与选中保持不变
 /// （拖拽只是挪行，不切换正在编辑的笔记；拖的恰好是当前笔记时选中自然跟随）
 pub fn reorder(app: &mut App, from: usize, to: usize) {
     if from >= app.notes.len() || to > app.notes.len() || from == to {
+        return;
+    }
+    // 置顶的只能在置顶区内拖，未置顶的只能在未置顶区内拖：
+    // to 是 remove 之后的插入索引，落点越界时收拢回本区边界
+    let boundary = pinned_count(app);
+    let to = if from < boundary {
+        to.clamp(0, boundary - 1)
+    } else {
+        to.clamp(boundary, app.notes.len())
+    };
+    if to == from || to == from + 1 {
         return;
     }
     // 移动前先记下当前笔记名：remove/insert 会平移索引，按名字重定位
@@ -168,8 +243,10 @@ fn lv_item_rect(lv: HWND, idx: i32) -> RECT {
 }
 
 /// 拖拽插入线的纵向位置（列表客户区 y）：光标所在行上/下边界；
-/// 行外光标或原位放置（拖了等于没拖）返回 None 不画线
-pub fn drag_line_y(lv: HWND, from: i32, x: i32, y: i32) -> Option<i32> {
+/// 行外光标或原位放置（拖了等于没拖）返回 None 不画线。
+/// pin_boundary = 置顶区边界（前缀里置顶笔记数）：落点越界时插入线
+/// 收拢画在置顶区底缘，不指向对方区域内部（与 reorder 的 clamp 同规则）
+pub fn drag_line_y(pin_boundary: usize, lv: HWND, from: i32, x: i32, y: i32) -> Option<i32> {
     let mut hti: LVHITTESTINFO = unsafe { std::mem::zeroed() };
     hti.pt = POINT { x, y };
     unsafe { SendMessageW(lv, LVM_HITTEST, 0, &mut hti as *mut _ as LPARAM) };
@@ -182,10 +259,21 @@ pub fn drag_line_y(lv: HWND, from: i32, x: i32, y: i32) -> Option<i32> {
     if from < to {
         to -= 1;
     }
+    let pb = pin_boundary as i32;
+    let raw = to;
+    let to = if from < pb {
+        to.clamp(0, pb - 1)
+    } else {
+        to.clamp(pb, i32::MAX)
+    };
     if to == from || to == from + 1 {
         return None;
     }
-    Some(if after { rc.bottom } else { rc.top })
+    if to == raw {
+        Some(if after { rc.bottom } else { rc.top })
+    } else {
+        Some(lv_item_rect(lv, pb - 1).bottom)
+    }
 }
 
 /// 自绘整行：选中淡底 + 标题文字 + 空状态提示
@@ -231,7 +319,7 @@ pub fn on_custom_draw(app: &crate::window::App, nm: &NMLVCUSTOMDRAW) -> LRESULT 
                 // 拖拽排序插入线：2px accent 横线画在目标行边界上
                 if let Some(d) = &app.note_drag {
                     if d.active {
-                        if let Some(y) = drag_line_y(lv, d.from, d.cx, d.cy) {
+                        if let Some(y) = drag_line_y(pinned_count(app), lv, d.from, d.cx, d.cy) {
                             let colw2 = SendMessageW(lv, LVM_GETCOLUMNWIDTH, 0, 0) as i32;
                             let b = CreateSolidBrush(p.accent);
                             FillRect(
@@ -267,13 +355,20 @@ pub fn on_custom_draw(app: &crate::window::App, nm: &NMLVCUSTOMDRAW) -> LRESULT 
                         None,
                     );
                 }
-                // 标题文字（行首无图标槽，左缩进 10 与「＋ 新建」文字对齐）
+                // 标题文字（行首无图标槽，左缩进 10 与「＋ 新建」文字对齐；
+                // 置顶行右界内缩给行尾图钉让位，长标题省略号照常）
+                let pinned = app.notes.get(idx).is_some_and(|m| m.pinned);
                 let title = app
                     .notes
                     .get(idx)
                     .map(|m| title_of(&m.filename))
                     .unwrap_or_default();
-                let mut tr = RECT { left: rc.left + 10, top: rc.top, right: rc.right - 8, bottom: rc.bottom };
+                let mut tr = RECT {
+                    left: rc.left + 10,
+                    top: rc.top,
+                    right: rc.right - if pinned { 26 } else { 8 },
+                    bottom: rc.bottom,
+                };
                 SelectObject(nm.nmcd.hdc, app.font);
                 SetTextColor(
                     nm.nmcd.hdc,
@@ -287,11 +382,110 @@ pub fn on_custom_draw(app: &crate::window::App, nm: &NMLVCUSTOMDRAW) -> LRESULT 
                     &mut tr,
                     DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
                 );
+                if pinned {
+                    draw_pin(nm.nmcd.hdc, rc.right - 17, (rc.top + rc.bottom) / 2, app.dark);
+                }
                 CDRF_SKIPDEFAULT as LRESULT
             }
             _ => CDRF_DODEFAULT as LRESULT,
         }
     }
+}
+
+// ---------- 行尾置顶图钉 ----------
+
+/// 置顶图钉 = 系统图标字体 Segoe MDL2 Assets 的 Pin 字形（U+E718，旋转为针尖
+/// 朝下）烘焙成的像素资源，由 assets/brand/make_pin_icon.py 生成（浅色/暗色
+/// 两套强调色各一份，theme.rs 改色后需重跑脚本）。运行时 CreateDIBSection +
+/// AlphaBlend 直接合成——不用运行时画矢量，视觉与设计稿逐像素一致
+static PIN_LIGHT_BIN: &[u8] = include_bytes!("../assets/brand/pin-light.bin");
+static PIN_DARK_BIN: &[u8] = include_bytes!("../assets/brand/pin-dark.bin");
+
+const PIN_W: i32 = 12;
+const PIN_H: i32 = 16;
+
+// 两个主题的图钉位图（memory DC + DIB），首次使用时按需创建。
+// 索引 0 = 浅色主题 1 = 暗色主题；进程退出统一在 cleanup_pin_assets 释放
+static mut PIN_DC: [isize; 2] = [0; 2];
+static mut PIN_BMP: [isize; 2] = [0; 2];
+
+/// WM_DESTROY 时释放图钉位图资源
+pub fn cleanup_pin_assets() {
+    unsafe {
+        let (dc, bmp) = (std::ptr::addr_of_mut!(PIN_DC), std::ptr::addr_of_mut!(PIN_BMP));
+        for i in 0..2 {
+            if (*dc)[i] != 0 {
+                DeleteDC((*dc)[i]);
+                (*dc)[i] = 0;
+            }
+            if (*bmp)[i] != 0 {
+                DeleteObject((*bmp)[i]);
+                (*bmp)[i] = 0;
+            }
+        }
+    }
+}
+
+/// 惰性创建 idx 主题的图钉位图（memory DC，选入预乘 BGRA 的 DIB）
+unsafe fn pin_dc(hdc: isize, idx: usize) -> isize {
+    let bin = if idx == 0 { PIN_LIGHT_BIN } else { PIN_DARK_BIN };
+    let (dc, bmp) = (std::ptr::addr_of_mut!(PIN_DC), std::ptr::addr_of_mut!(PIN_BMP));
+    if (*dc)[idx] == 0 {
+        let mut bmi: BITMAPINFO = std::mem::zeroed();
+        bmi.bmiHeader = BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: PIN_W,
+            biHeight: PIN_H, // 正高度 = 自底向上，与 .bin 排布一致
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB,
+            ..std::mem::zeroed()
+        };
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let mem = CreateCompatibleDC(hdc);
+        let hbmp = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &mut bits, 0, 0);
+        if mem != 0 && hbmp != 0 && !bits.is_null() && bin.len() == (PIN_W * PIN_H * 4) as usize {
+            std::ptr::copy_nonoverlapping(bin.as_ptr(), bits as *mut u8, bin.len());
+            DeleteObject(windows_sys::Win32::Graphics::Gdi::SelectObject(mem, hbmp));
+            (*dc)[idx] = mem;
+            (*bmp)[idx] = hbmp;
+        } else {
+            if hbmp != 0 {
+                DeleteObject(hbmp);
+            }
+            if mem != 0 {
+                DeleteDC(mem);
+            }
+        }
+    }
+    (*dc)[idx]
+}
+
+/// 行尾画置顶图钉（cx, cy = 图标中心；dark = 当前是否暗色主题）
+unsafe fn draw_pin(hdc: isize, cx: i32, cy: i32, dark: bool) {
+    let src = pin_dc(hdc, dark as usize);
+    if src == 0 {
+        return;
+    }
+    let bf = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: 255,
+        AlphaFormat: AC_SRC_ALPHA as u8,
+    };
+    AlphaBlend(
+        hdc,
+        cx - PIN_W / 2,
+        cy - PIN_H / 2,
+        PIN_W,
+        PIN_H,
+        src,
+        0,
+        0,
+        PIN_W,
+        PIN_H,
+        bf,
+    );
 }
 
 // ---------- 业务 ----------
@@ -329,6 +523,7 @@ pub fn refresh(app: &mut App) {
     let lv = app.note_list;
     unsafe { SendMessageW(lv, LVM_DELETEALLITEMS, 0, 0) };
 
+    let pinned = load_pinned();
     let mut metas: Vec<NoteMeta> = std::fs::read_dir(dir())
         .map(|rd| {
             rd.filter_map(|e| e.ok())
@@ -336,6 +531,7 @@ pub fn refresh(app: &mut App) {
                 .map(|e| {
                     let filename = e.file_name().to_string_lossy().into_owned();
                     NoteMeta {
+                        pinned: pinned.contains(&filename),
                         filename,
                         mtime: mtime_of(&e.path()),
                     }
@@ -343,15 +539,18 @@ pub fn refresh(app: &mut App) {
                 .collect()
         })
         .unwrap_or_default();
-    // 手动排序为准：按顺序文件的记录排；未记录的（外部新增/首次运行）
-    // 按 mtime 倒序追加到末尾。编辑笔记不再让行浮上来
+    // 置顶组固定在最前（Reverse：pinned=true 排前），组内仍按手动排序：
+    // 按顺序文件的记录排；未记录的（外部新增/首次运行）按 mtime 倒序追加到
+    // 组末尾。编辑笔记不再让行浮上来
     let order = load_order();
     metas.sort_by(|a, b| {
         let ka = (
+            std::cmp::Reverse(a.pinned),
             order.iter().position(|n| n == &a.filename).unwrap_or(usize::MAX),
             std::cmp::Reverse(a.mtime),
         );
         let kb = (
+            std::cmp::Reverse(b.pinned),
             order.iter().position(|n| n == &b.filename).unwrap_or(usize::MAX),
             std::cmp::Reverse(b.mtime),
         );
@@ -360,6 +559,9 @@ pub fn refresh(app: &mut App) {
     // 回写：清理已删文件的残留条目，把外部新增的文件记录进去
     let names: Vec<String> = metas.iter().map(|m| m.filename.clone()).collect();
     write_order(&names);
+    // 置顶文件同样回写：清掉已删文件的残留条目（置顶名单不新增条目）
+    let pins: Vec<String> = load_pinned().into_iter().filter(|n| names.contains(n)).collect();
+    write_pinned(&pins);
 
     app.cur_note = None;
     for (i, m) in metas.iter().enumerate() {
@@ -571,6 +773,12 @@ pub fn apply_rename(app: &mut App, idx: usize, new_text: &str) -> bool {
     if let Some(p) = order.iter().position(|n| n == &old) {
         order[p] = new_name.clone();
         write_order(&order);
+    }
+    // 置顶名单同步改名：旧名不更新，下次 refresh 残留清理会把置顶弄丢
+    let mut pins = load_pinned();
+    if let Some(p) = pins.iter().position(|n| n == &old) {
+        pins[p] = new_name.clone();
+        write_pinned(&pins);
     }
     lv_set_text(app.note_list, idx as i32, &new_title);
     if app.cur_note == Some(idx) {

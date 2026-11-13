@@ -86,6 +86,7 @@ const SUB_BTN: usize = 10; // owner-draw 按钮的悬停跟踪子类
 const M_NOTE_NEW: u32 = 2001;
 const M_NOTE_RENAME: u32 = 2002;
 const M_NOTE_DELETE: u32 = 2003;
+const M_NOTE_PIN: u32 = 2004;
 const M_TODO_EDIT: u32 = 2101;
 const M_TODO_DELETE: u32 = 2102;
 const M_TODO_CLEAR: u32 = 2103;
@@ -1171,6 +1172,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 app.font_strike = 0;
                 app.font_title = 0;
             });
+            notes::cleanup_pin_assets();
             tray::remove(hwnd);
             unsafe {
                 let p = std::ptr::addr_of_mut!(GDIP);
@@ -1383,17 +1385,27 @@ fn popup_at(hwnd: HWND, items: &[(u32, &str, bool)]) -> u32 {
 }
 
 fn note_ctx_menu(hwnd: HWND) {
+    // 置顶项文案随选中项状态切换（菜单构建时列表选中项不会变）
+    let pin_label = with_app(|app| {
+        if notes::selected_pinned(app) {
+            "取消置顶"
+        } else {
+            "置顶"
+        }
+    });
     match popup_at(
         hwnd,
         &[
             (M_NOTE_NEW, "新建笔记", false),
             (M_NOTE_RENAME, "重命名", false),
+            (M_NOTE_PIN, pin_label, false),
             (0, "", true),
             (M_NOTE_DELETE, "删除", false),
         ],
     ) {
         M_NOTE_NEW => with_app(notes::create_note),
         M_NOTE_RENAME => with_app(notes::begin_rename),
+        M_NOTE_PIN => with_app(notes::toggle_pin),
         M_NOTE_DELETE => with_app(notes::delete_selected),
         _ => {}
     }
@@ -1496,8 +1508,9 @@ fn lv_item_rect_bounds(lv: HWND, idx: i32) -> RECT {
 }
 
 /// 拖拽落点：光标所在行上半 → 插到行前，下半 → 行后；返回已按移出位置
-/// 校正的插入索引（原位放下返回 None）。插入指示线由 notes 自绘管线画
-fn drag_drop_index(lv: HWND, from: i32, x: i32, y: i32) -> Option<usize> {
+/// 校正的插入索引（原位放下返回 None）。插入指示线由 notes 自绘管线画。
+/// pin_boundary = 置顶区边界：落点越界时收拢回本区（与 notes::reorder 同规则）
+fn drag_drop_index(lv: HWND, from: i32, x: i32, y: i32, pin_boundary: usize) -> Option<usize> {
     let item = lv_hit_item(lv, x, y);
     if item < 0 {
         return None;
@@ -1508,6 +1521,12 @@ fn drag_drop_index(lv: HWND, from: i32, x: i32, y: i32) -> Option<usize> {
     if from < to {
         to -= 1;
     }
+    let pb = pin_boundary as i32;
+    let to = if from < pb {
+        to.clamp(0, pb - 1)
+    } else {
+        to.clamp(pb, i32::MAX)
+    };
     if to == from || to == from + 1 {
         return None; // 原位放下
     }
@@ -1655,6 +1674,8 @@ unsafe extern "system" fn child_subclass(
             WM_MOUSEMOVE => {
                 with_app(|app| {
                     if id == SUB_NOTE_LIST {
+                        // 边界值先取：d 可变借用 note_drag 字段期间不能整体借用 app
+                        let pb = notes::pinned_count(app);
                         if let Some(d) = &mut app.note_drag {
                             let x = ((lp as usize) & 0xffff) as u16 as i16 as i32;
                             let y = (((lp as usize) >> 16) & 0xffff) as u16 as i16 as i32;
@@ -1666,7 +1687,7 @@ unsafe extern "system" fn child_subclass(
                             if d.active {
                                 // 只失效新旧插入线两条细带：整表失效每 move 全量重绘
                                 // （擦底+重画所有行）肉眼就是持续闪烁
-                                let new_line = notes::drag_line_y(hwnd, d.from, d.cx, d.cy);
+                                let new_line = notes::drag_line_y(pb, hwnd, d.from, d.cx, d.cy);
                                 if new_line.unwrap_or(-1) != d.line {
                                     let mut crc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
                                     unsafe { GetClientRect(hwnd, &mut crc) };
@@ -1697,7 +1718,7 @@ unsafe extern "system" fn child_subclass(
                             if d.active {
                                 let x = ((lp as usize) & 0xffff) as u16 as i16 as i32;
                                 let y = (((lp as usize) >> 16) & 0xffff) as u16 as i16 as i32;
-                                if let Some(to) = drag_drop_index(hwnd, d.from, x, y) {
+                                if let Some(to) = drag_drop_index(hwnd, d.from, x, y, notes::pinned_count(app)) {
                                     // reorder 内部 refresh 全表重绘，顺带抹掉插入线
                                     notes::reorder(app, d.from as usize, to);
                                 } else {
