@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 
-use windows_sys::Win32::Foundation::{HWND, LRESULT, LPARAM, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LRESULT, LPARAM, POINT, RECT, WPARAM};
 use windows_sys::Win32::UI::Controls::{
     CDDS_ITEMPREPAINT, CDDS_POSTPAINT, CDDS_PREPAINT, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW,
     CDRF_NOTIFYPOSTPAINT, LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS,
     LVM_ENSUREVISIBLE, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMSTATE, LVM_GETNEXTITEM,
+    LVM_HITTEST, LVHITTESTINFO,
     LVM_INSERTITEMW, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVIS_SELECTED, LVNI_SELECTED,
     NMLVCUSTOMDRAW,
 };
@@ -73,6 +74,52 @@ fn is_note_file(name: &str) -> bool {
     matches!(ext_of(name).as_str(), "md" | "txt")
 }
 
+// ---------- 手动排序（拖拽顺序持久化） ----------
+
+/// 顺序文件：一行一个文件名。列表以它为准排序，不参与 mtime；
+/// 没记录到的新文件（外部新增）按 mtime 倒序追加到末尾
+fn order_file() -> std::path::PathBuf {
+    crate::util::data_dir().join("notes.order")
+}
+
+fn load_order() -> Vec<String> {
+    std::fs::read_to_string(order_file())
+        .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+fn write_order(names: &[String]) {
+    let mut s = names.join("\n");
+    if !s.is_empty() {
+        s.push('\n');
+    }
+    let _ = std::fs::write(order_file(), s);
+}
+
+/// 应用当前列表顺序到顺序文件（拖拽/删除等内存已改好的场景）
+pub fn save_order_from_app(app: &App) {
+    let names: Vec<String> = app.notes.iter().map(|m| m.filename.clone()).collect();
+    write_order(&names);
+}
+
+/// 拖拽落地：把列表项 from 移动到 to，持久化顺序。编辑器与选中保持不变
+/// （拖拽只是挪行，不切换正在编辑的笔记；拖的恰好是当前笔记时选中自然跟随）
+pub fn reorder(app: &mut App, from: usize, to: usize) {
+    if from >= app.notes.len() || to > app.notes.len() || from == to {
+        return;
+    }
+    // 移动前先记下当前笔记名：remove/insert 会平移索引，按名字重定位
+    let cur_name = app.cur_note.and_then(|i| app.notes.get(i)).map(|m| m.filename.clone());
+    let moved = app.notes.remove(from);
+    app.notes.insert(to, moved);
+    save_order_from_app(app);
+    if let Some(n) = &cur_name {
+        app.cur_note = app.notes.iter().position(|m| m.filename == *n);
+        app.cfg.last_note = n.clone();
+    }
+    refresh(app);
+}
+
 // ---------- ListView 裸操作 ----------
 
 fn lv_insert(lv: HWND, idx: i32, text: &str) {
@@ -120,6 +167,27 @@ fn lv_item_rect(lv: HWND, idx: i32) -> RECT {
     rc
 }
 
+/// 拖拽插入线的纵向位置（列表客户区 y）：光标所在行上/下边界；
+/// 行外光标或原位放置（拖了等于没拖）返回 None 不画线
+pub fn drag_line_y(lv: HWND, from: i32, x: i32, y: i32) -> Option<i32> {
+    let mut hti: LVHITTESTINFO = unsafe { std::mem::zeroed() };
+    hti.pt = POINT { x, y };
+    unsafe { SendMessageW(lv, LVM_HITTEST, 0, &mut hti as *mut _ as LPARAM) };
+    if hti.iItem < 0 {
+        return None;
+    }
+    let rc = lv_item_rect(lv, hti.iItem);
+    let after = y > (rc.top + rc.bottom) / 2;
+    let mut to = if after { hti.iItem + 1 } else { hti.iItem };
+    if from < to {
+        to -= 1;
+    }
+    if to == from || to == from + 1 {
+        return None;
+    }
+    Some(if after { rc.bottom } else { rc.top })
+}
+
 /// 自绘整行：选中淡底 + 标题文字 + 空状态提示
 pub fn on_custom_draw(app: &crate::window::App, nm: &NMLVCUSTOMDRAW) -> LRESULT {
     use windows_sys::Win32::Graphics::Gdi::{
@@ -159,6 +227,21 @@ pub fn on_custom_draw(app: &crate::window::App, nm: &NMLVCUSTOMDRAW) -> LRESULT 
                 }
                 if SendMessageW(lv, LVM_GETITEMCOUNT, 0, 0) == 0 {
                     crate::util::draw_hint_centered(nm.nmcd.hdc, &rc, "点「＋ 新建」写第一篇笔记", p.text_sec, app.font);
+                }
+                // 拖拽排序插入线：2px accent 横线画在目标行边界上
+                if let Some(d) = &app.note_drag {
+                    if d.active {
+                        if let Some(y) = drag_line_y(lv, d.from, d.cx, d.cy) {
+                            let colw2 = SendMessageW(lv, LVM_GETCOLUMNWIDTH, 0, 0) as i32;
+                            let b = CreateSolidBrush(p.accent);
+                            FillRect(
+                                nm.nmcd.hdc,
+                                &RECT { left: 0, top: y - 1, right: colw2.max(rc.right), bottom: y + 1 },
+                                b,
+                            );
+                            DeleteObject(b);
+                        }
+                    }
                 }
                 CDRF_DODEFAULT as LRESULT
             }
@@ -260,7 +343,23 @@ pub fn refresh(app: &mut App) {
                 .collect()
         })
         .unwrap_or_default();
-    metas.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    // 手动排序为准：按顺序文件的记录排；未记录的（外部新增/首次运行）
+    // 按 mtime 倒序追加到末尾。编辑笔记不再让行浮上来
+    let order = load_order();
+    metas.sort_by(|a, b| {
+        let ka = (
+            order.iter().position(|n| n == &a.filename).unwrap_or(usize::MAX),
+            std::cmp::Reverse(a.mtime),
+        );
+        let kb = (
+            order.iter().position(|n| n == &b.filename).unwrap_or(usize::MAX),
+            std::cmp::Reverse(b.mtime),
+        );
+        ka.cmp(&kb)
+    });
+    // 回写：清理已删文件的残留条目，把外部新增的文件记录进去
+    let names: Vec<String> = metas.iter().map(|m| m.filename.clone()).collect();
+    write_order(&names);
 
     app.cur_note = None;
     for (i, m) in metas.iter().enumerate() {
@@ -347,6 +446,11 @@ pub fn create_note(app: &mut App) {
     }
     let filename = format!("{title}.md");
     let _ = std::fs::write(dir().join(&filename), "");
+    // 新笔记固定置顶：插到顺序文件最前面
+    let mut order = load_order();
+    order.retain(|n| n != &filename);
+    order.insert(0, filename.clone());
+    write_order(&order);
     refresh_keep(app, &filename);
     // 直接在列表项上进入命名：编辑框全选默认名，键入即整体替换
     // （Enter 提交新名；Esc 取消则保留默认名，与资源管理器一致）
@@ -456,6 +560,12 @@ pub fn apply_rename(app: &mut App, idx: usize, new_text: &str) -> bool {
         return false;
     }
     app.notes[idx].filename = new_name.clone();
+    // 顺序文件同步改名：否则下次 refresh 时新名字不在记录里，会被追加到末尾
+    let mut order = load_order();
+    if let Some(p) = order.iter().position(|n| n == &old) {
+        order[p] = new_name.clone();
+        write_order(&order);
+    }
     lv_set_text(app.note_list, idx as i32, &new_title);
     if app.cur_note == Some(idx) {
         app.cfg.last_note = new_name;

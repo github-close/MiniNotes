@@ -13,6 +13,7 @@ use windows_sys::Win32::UI::Controls::{
     LVS_EX_FULLROWSELECT, LVS_NOCOLUMNHEADER, LVS_REPORT, LVS_SHOWSELALWAYS,
     LVIF_STATE, LVIS_SELECTED, LVSIL_SMALL, WM_MOUSELEAVE, DRAWITEMSTRUCT, NMHDR, ODS_SELECTED,
     NMLISTVIEW, NMITEMACTIVATE, NMLVCUSTOMDRAW,
+    LVM_GETITEMRECT, LVM_HITTEST, LVHITTESTINFO,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL,
@@ -30,7 +31,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SIZE_MINIMIZED, SW_HIDE, SW_RESTORE, SW_SHOW, SPI_GETWORKAREA, SM_CXSIZEFRAME,
     SM_CXPADDEDBORDER, SM_CYSIZEFRAME,
     BS_OWNERDRAW, DI_NORMAL, WNDCLASSW,
-    WM_ACTIVATE, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC,
+    WM_ACTIVATE, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_MOUSEWHEEL,
     WM_CTLCOLOREDIT, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_HOTKEY,
     WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_PASTE,
     WM_NCHITTEST,
@@ -140,7 +141,24 @@ pub struct App {
     pub todo_slot: RECT,                      // 待办输入框的视觉槽（父窗口画描边用）
     pub input_line_h: i32,                    // UI 字体行高（输入框控件高度 = 行高）
     pub rename: Option<crate::rename::State>, // 进行中的内联重命名（自管理编辑框）
+    pub note_drag: Option<NoteDrag>,          // 笔记列表拖拽排序状态
 }
+
+/// 笔记列表拖拽：from = 按下时的行；sx/sy = 按下点；cx/cy = 当前光标（列表客户区
+/// 坐标，供自绘插入线取位）；line = 当前插入线 y（-1 = 未画）；active = 拖拽中
+#[derive(Clone, Copy)]
+pub struct NoteDrag {
+    pub from: i32,
+    pub sx: i32,
+    pub sy: i32,
+    pub cx: i32,
+    pub cy: i32,
+    pub line: i32,
+    pub active: bool,
+}
+
+// 拖拽排序：插入指示线由列表自绘管线（notes::on_custom_draw POSTPAINT）画，
+// 不用 comctl 插入标记——LVM_SETINSERTMARK 在本列表配置下实测不生效
 
 // Win32 消息天然重入（SendMessage 会同步回调 wndproc），RefCell 会撞借用 panic，
 // 因此用静态裸指针保存 App（UI 单线程，等同 C 的 GWLP_USERDATA 模式）。
@@ -208,7 +226,9 @@ pub fn create(hicon: isize) -> HWND {
 
         let mut wa = RECT { left: 0, top: 0, right: 1280, bottom: 720 };
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut wa as *mut RECT as *mut core::ffi::c_void, 0);
-        let (cx, cy) = (720i32, 540i32);
+        // 默认 480x360（720x540 的三分之二）：无滚动可容纳列表+编辑器，
+        // 字号不变，只是内容区收窄；用户拉伸后仍按保存尺寸恢复
+        let (cx, cy) = (480i32, 360i32);
         let x = wa.left + ((wa.right - wa.left - cx) / 2).max(0);
         let y = wa.top + ((wa.bottom - wa.top - cy) / 2).max(0);
 
@@ -378,6 +398,7 @@ pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
         todo_slot: RECT { left: 0, top: 0, right: 0, bottom: 0 },
         input_line_h: 20,
         rename: None,
+        note_drag: None,
     });
 
     unsafe {
@@ -1458,6 +1479,41 @@ unsafe extern "system" fn button_subclass(
     DefSubclassProc(hwnd, msg, wp, lp)
 }
 
+// ---------- 笔记列表拖拽排序 ----------
+
+fn lv_hit_item(lv: HWND, x: i32, y: i32) -> i32 {
+    let mut hti: LVHITTESTINFO = unsafe { std::mem::zeroed() };
+    hti.pt = POINT { x, y };
+    unsafe { SendMessageW(lv, LVM_HITTEST, 0, &mut hti as *mut _ as LPARAM) };
+    hti.iItem
+}
+
+fn lv_item_rect_bounds(lv: HWND, idx: i32) -> RECT {
+    // RECT.left 输入时是 LVIR_* 代码：0 = LVIR_BOUNDS（整行）
+    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    unsafe { SendMessageW(lv, LVM_GETITEMRECT, idx as WPARAM, &mut rc as *mut _ as LPARAM) };
+    rc
+}
+
+/// 拖拽落点：光标所在行上半 → 插到行前，下半 → 行后；返回已按移出位置
+/// 校正的插入索引（原位放下返回 None）。插入指示线由 notes 自绘管线画
+fn drag_drop_index(lv: HWND, from: i32, x: i32, y: i32) -> Option<usize> {
+    let item = lv_hit_item(lv, x, y);
+    if item < 0 {
+        return None;
+    }
+    let rc = lv_item_rect_bounds(lv, item);
+    let mut to = if y > (rc.top + rc.bottom) / 2 { item + 1 } else { item };
+    // 移出位置在落点之前时，落点索引左移一格（先删后插）
+    if from < to {
+        to -= 1;
+    }
+    if to == from || to == from + 1 {
+        return None; // 原位放下
+    }
+    Some(to as usize)
+}
+
 /// 子控件键盘行为
 unsafe extern "system" fn child_subclass(
     hwnd: HWND,
@@ -1548,6 +1604,143 @@ unsafe extern "system" fn child_subclass(
                 if code == EN_CHANGE && cid == crate::rename::ID_RENAME_EDIT {
                     unsafe { InvalidateRect(lp as HWND, std::ptr::null(), 0) };
                 }
+            }
+            // 拖拽中滚动滚轮：原生滚动是位块搬移，会把已画的插入线像素一起
+            // 搬到新位置，产生一串幽灵线；滚轮事件后整表失效一次全部清掉
+            // （滚轮事件稀疏，整表重绘开销可忽略；拖拽中光标不动时幽灵线
+            // 靠这个清除——增量失效只在光标移动时触发，管不到滚动）
+            WM_MOUSEWHEEL => {
+                let r = unsafe { DefSubclassProc(hwnd, msg, wp, lp) };
+                with_app(|app| {
+                    if id == SUB_NOTE_LIST && app.note_drag.map(|d| d.active) == Some(true) {
+                        unsafe { InvalidateRect(hwnd, std::ptr::null(), 1) };
+                    }
+                });
+                return r;
+            }
+            // 拖拽中屏蔽全部按键：Delete 触发删笔记、Esc 隐藏窗口、方向键移动
+            // 选中并滚动——拖到一半任何一条都会乱套
+            WM_KEYDOWN | WM_SYSKEYDOWN => {
+                let swallow = with_app(|app| {
+                    id == SUB_NOTE_LIST && app.note_drag.map(|d| d.active) == Some(true)
+                });
+                if swallow {
+                    return 1;
+                }
+            }
+            // 拖拽排序：按下记录候选行，移动越阈值后自绘管线画插入线，
+            // 抬起时落地重排。处理完仍走 DefSubclassProc，不影响原生选中
+            WM_LBUTTONDOWN => {
+                with_app(|app| {
+                    if id == SUB_NOTE_LIST && app.rename.is_none() {
+                        let x = ((lp as usize) & 0xffff) as u16 as i16 as i32;
+                        let y = (((lp as usize) >> 16) & 0xffff) as u16 as i16 as i32;
+                        let item = lv_hit_item(hwnd, x, y);
+                        app.note_drag = if item >= 0 {
+                            Some(NoteDrag {
+                                from: item,
+                                sx: x,
+                                sy: y,
+                                cx: x,
+                                cy: y,
+                                line: -1,
+                                active: false,
+                            })
+                        } else {
+                            None
+                        };
+                    }
+                });
+            }
+            WM_MOUSEMOVE => {
+                with_app(|app| {
+                    if id == SUB_NOTE_LIST {
+                        if let Some(d) = &mut app.note_drag {
+                            let x = ((lp as usize) & 0xffff) as u16 as i16 as i32;
+                            let y = (((lp as usize) >> 16) & 0xffff) as u16 as i16 as i32;
+                            d.cx = x;
+                            d.cy = y;
+                            if !d.active && (x - d.sx).abs() + (y - d.sy).abs() > 6 {
+                                d.active = true;
+                            }
+                            if d.active {
+                                // 只失效新旧插入线两条细带：整表失效每 move 全量重绘
+                                // （擦底+重画所有行）肉眼就是持续闪烁
+                                let new_line = notes::drag_line_y(hwnd, d.from, d.cx, d.cy);
+                                if new_line.unwrap_or(-1) != d.line {
+                                    let mut crc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                                    unsafe { GetClientRect(hwnd, &mut crc) };
+                                    let mut strip = |y: i32| unsafe {
+                                        InvalidateRect(
+                                            hwnd,
+                                            &RECT { left: 0, top: y - 2, right: crc.right, bottom: y + 2 },
+                                            1,
+                                        )
+                                    };
+                                    if d.line >= 0 {
+                                        strip(d.line);
+                                    }
+                                    if let Some(yy) = new_line {
+                                        strip(yy);
+                                    }
+                                    d.line = new_line.unwrap_or(-1);
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            WM_LBUTTONUP => {
+                with_app(|app| {
+                    if id == SUB_NOTE_LIST {
+                        if let Some(d) = app.note_drag.take() {
+                            if d.active {
+                                let x = ((lp as usize) & 0xffff) as u16 as i16 as i32;
+                                let y = (((lp as usize) >> 16) & 0xffff) as u16 as i16 as i32;
+                                if let Some(to) = drag_drop_index(hwnd, d.from, x, y) {
+                                    // reorder 内部 refresh 全表重绘，顺带抹掉插入线
+                                    notes::reorder(app, d.from as usize, to);
+                                } else {
+                                    // 落点无效只抹掉插入线
+                                    if d.line >= 0 {
+                                        let mut crc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                                        unsafe { GetClientRect(hwnd, &mut crc) };
+                                        unsafe {
+                                            InvalidateRect(
+                                                hwnd,
+                                                &RECT { left: 0, top: d.line - 2, right: crc.right, bottom: d.line + 2 },
+                                                1,
+                                            )
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            // 注意：不处理 WM_CAPTURECHANGED——comctl 列表按下后自行 SetCapture，
+            // 检测到拖拽发出 LVN_BEGINDRAG 后会 ReleaseCapture（约定由应用接管拖拽
+            // 循环），此时捕获丢失消息必然到达，但我们的拖拽不依赖捕获：光标仍
+            // 在列表上就仍能收到 WM_MOUSEMOVE/WM_LBUTTONUP，状态由 BUTTONUP 收尾。
+            // 若在此清状态，拖拽永远活不过 BEGINDRAG
+            WM_KILLFOCUS => {
+                // 失焦兜底：拖拽中途点别处/Alt-Away，残留的插入线随状态清除
+                with_app(|app| {
+                    if let Some(d) = app.note_drag.take() {
+                        if d.line >= 0 {
+                            let mut crc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                            unsafe { GetClientRect(hwnd, &mut crc) };
+                            unsafe {
+                                InvalidateRect(
+                                    hwnd,
+                                    &RECT { left: 0, top: d.line - 2, right: crc.right, bottom: d.line + 2 },
+                                    1,
+                                )
+                            };
+                        }
+                    }
+                });
             }
             _ => {}
         }
