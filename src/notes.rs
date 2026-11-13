@@ -499,16 +499,22 @@ pub fn delete_selected(app: &mut App) {
     let was_cur = app.cur_note == Some(idx as usize);
     app.notes.remove(idx as usize);
     if was_cur {
-        app.cur_note = None;
         app.note_dirty = false;
     }
-    // 选中替代项：先记下文件名，refresh 会按 mtime 重排列表，用索引会指错行
+    // 选中替代项：先记下文件名（手动排序下位置是稳定的，但 refresh 的
+    // keep 解析按文件名走，用索引指行依旧不可靠）
     let next_name = if app.notes.is_empty() {
         None
     } else {
         let i = (idx as usize).min(app.notes.len() - 1);
         Some(app.notes[i].filename.clone())
     };
+    // 关键：把 cur_note 预定位到邻位笔记，refresh 的 keep 解析才能选中它。
+    // 否则 keep 退回 cfg.last_note（= 被删笔记名），列表里找不到 → sel=0，
+    // 高亮和视口跳到最顶；而 load_by_index 不更新列表高亮，跳顶就定型了
+    if let Some(n) = &next_name {
+        app.cur_note = app.notes.iter().position(|m| m.filename == *n);
+    }
     refresh(app);
     match next_name.and_then(|n| app.notes.iter().position(|m| m.filename == n)) {
         Some(i) => load_by_index(app, i),
