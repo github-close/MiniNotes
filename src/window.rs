@@ -2,8 +2,9 @@ use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, REC
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen, CreateSolidBrush,
     DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect, LineTo, MoveToEx,
-    SelectObject, SetBkMode, SetTextColor, DT_CENTER, DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
-    HDC, PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT,
+    RedrawWindow, SelectObject, SetBkMode, SetTextColor, DT_CENTER, DT_LEFT, DT_RIGHT,
+    DT_SINGLELINE, DT_VCENTER, HDC, PAINTSTRUCT, PS_SOLID, RDW_ALLCHILDREN, RDW_ERASE,
+    RDW_INVALIDATE, SRCCOPY, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
@@ -635,6 +636,19 @@ fn focus_page(app: &App) {
         } else {
             SetFocus(app.editor);
         }
+        // 切页后强制整页（含全部子控件）失效重绘。原因：新显示的子控件在隐藏
+        // 期间，屏幕上还是另一页的像素；本函数的 SetFocus（建光标/滚动）以及
+        // 紧随其后到达的按键/IME 触发控件滚动时，EDIT/列表的滚动优化会 BitBlt
+        // 搬移「当时的屏幕像素」并只失效新暴露的窄条——搬进来的旧页像素没有任何
+        // 人会重绘（WM_PAINT 只画窄条），表现为切页后另一页的残留出现在列表/
+        // 编辑器里，且只在光标位置恰好需要滚动时出现（时有时无）。此处全量失效
+        // 令被搬移的像素随下一轮 WM_PAINT 一并重绘，窗口期内不再有可搬的旧像素
+        RedrawWindow(
+            app.hwnd,
+            std::ptr::null(),
+            0,
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+        );
     }
 }
 
