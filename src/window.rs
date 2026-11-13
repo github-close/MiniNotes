@@ -120,6 +120,8 @@ pub struct App {
     pub font: isize,
     pub font_strike: isize,
     pub font_title: isize,
+    pub font_todo: isize,        // 待办列表文字 13px（正文比界面字体大一号）
+    pub font_todo_strike: isize, // 待办完成态 13px 删除线
 
     pub notes: Vec<notes::NoteMeta>,
     pub cur_note: Option<usize>,
@@ -273,88 +275,50 @@ fn child(parent: HWND, class: &str, text: &str, style: u32, exstyle: u32, id: u3
     }
 }
 
-/// 26px 高的透明小图列表：挂到列表上把行高撑起来，给自绘勾选框留空间
-/// 勾选框图标列表：3 张不透明 24x26 图（0=纯行背景，1=未完成圆圈，2=完成勾选）。
+// 勾选框图标条：3 张 24x26 图（0=纯行背景，1=未完成圆环，2=完成对勾），
+// 像素由 assets/brand/make_todo_checkboxes.py 离线烘焙（4x 超采样抗锯齿，
+// 两套主题色各一份，theme.rs 改色后需重跑脚本）
+static TODO_ICONS_LIGHT: &[u8] = include_bytes!("../assets/brand/todo-icons-light.bin");
+static TODO_ICONS_DARK: &[u8] = include_bytes!("../assets/brand/todo-icons-dark.bin");
+
+/// 26px 高的透明小图列表：挂到列表上把行高撑起来，给自绘勾选框留空间。
 /// 这台 Win10 的 ImageList 不支持 alpha/mask 透明（全画成黑色不透明块），
-/// 因此图标自带行背景色底——与列表底色相同，视觉无缝；选中行的高亮从图标槽右侧开始。
+/// 因此图标自带行背景色底——与列表底色相同，视觉无缝；选中行的高亮从图标槽右侧开始
 fn make_checkbox_imagelist(dark: bool) -> isize {
-    let p = theme::palette(dark);
+    let bin = if dark { TODO_ICONS_DARK } else { TODO_ICONS_LIGHT };
     unsafe {
         let himl = ImageList_Create(24, 26, ILC_COLOR32, 3, 1);
-        // 0 = 纯背景
-        add_icon(himl, |_, _| p.window_bg);
-        // 1 = 未完成：圆圈描边
-        add_icon(himl, |x, y| {
-            let d = ((x as f32 + 0.5) - 12.0).hypot((y as f32 + 0.5) - 13.0);
-            if d > 5.2 && d < 6.4 {
-                p.text_disabled
-            } else {
-                p.window_bg
-            }
-        });
-        // 2 = 完成：实心圆 + 白色对勾
-        add_icon(himl, |x, y| {
-            let d = ((x as f32 + 0.5) - 12.0).hypot((y as f32 + 0.5) - 13.0);
-            if d < 6.8 {
-                // 对勾两段线：像素接近线段即命中
-                let da = seg_dist(x as f32 + 0.5, y as f32 + 0.5, 8.8, 13.2, 11.0, 16.0);
-                let db = seg_dist(x as f32 + 0.5, y as f32 + 0.5, 11.0, 16.0, 15.4, 9.4);
-                if da.min(db) < 1.05 {
-                    p.on_accent
-                } else {
-                    p.accent
-                }
-            } else {
-                p.window_bg
-            }
-        });
+        // 72x26 的图标条（3 格横排）一次 ImageList_Add，按 cx=24 自动切成 3 张
+        let mut bmi: windows_sys::Win32::Graphics::Gdi::BITMAPINFO = std::mem::zeroed();
+        bmi.bmiHeader.biSize = std::mem::size_of::<windows_sys::Win32::Graphics::Gdi::BITMAPINFOHEADER>() as u32;
+        bmi.bmiHeader.biWidth = 72;
+        bmi.bmiHeader.biHeight = 26; // 正高度 = 自底向上，与 .bin 排布一致
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = 0; // BI_RGB
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let mem = CreateCompatibleDC(0);
+        let hbmp = windows_sys::Win32::Graphics::Gdi::CreateDIBSection(
+            mem,
+            &bmi,
+            windows_sys::Win32::Graphics::Gdi::DIB_RGB_COLORS,
+            &mut bits,
+            0,
+            0,
+        );
+        if himl != 0 && hbmp != 0 && !bits.is_null() && bin.len() == 72 * 26 * 4 {
+            std::ptr::copy_nonoverlapping(bin.as_ptr(), bits as *mut u8, bin.len());
+            ImageList_Add(himl, hbmp, 0);
+        }
+        // ImageList_Add 只拷贝位图，临时 DIB 用完必须自己释放
+        if hbmp != 0 {
+            DeleteObject(hbmp);
+        }
+        if mem != 0 {
+            DeleteDC(mem);
+        }
         himl
     }
-}
-
-/// 生成一张图标并挂进 ImageList。ImageList_Add 只拷贝位图，DIB 用完必须自己释放
-fn add_icon(himl: isize, fill: impl Fn(i32, i32) -> COLORREF) {
-    unsafe {
-        let hb = make_icon_dib(fill);
-        ImageList_Add(himl, hb, 0);
-        DeleteObject(hb);
-    }
-}
-
-/// 创建 24x26 的 32bpp top-down DIB 并按像素填充（COLORREF -> 0xFFBBGGRR 像素值）
-unsafe fn make_icon_dib(fill: impl Fn(i32, i32) -> COLORREF) -> windows_sys::Win32::Graphics::Gdi::HBITMAP {
-    let mut bi: windows_sys::Win32::Graphics::Gdi::BITMAPINFO = std::mem::zeroed();
-    bi.bmiHeader.biSize = std::mem::size_of::<windows_sys::Win32::Graphics::Gdi::BITMAPINFOHEADER>() as u32;
-    bi.bmiHeader.biWidth = 24;
-    bi.bmiHeader.biHeight = -26;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = 0; // BI_RGB
-    let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-    let hdib = windows_sys::Win32::Graphics::Gdi::CreateDIBSection(0, &bi, 0, &mut bits, 0, 0);
-    if hdib != 0 && !bits.is_null() {
-        let px = bits as *mut u32;
-        for y in 0..26 {
-            for x in 0..24 {
-                let c = fill(x, y);
-                // COLORREF 是 0x00BBGGRR，32bpp DIB 像素的 u32 是 0xAARRGGBB：需要交换 R/B
-                *px.add((y * 24 + x) as usize) =
-                    0xFF00_0000 | ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF);
-            }
-        }
-    }
-    hdib
-}
-
-/// 点到线段的最短距离
-fn seg_dist(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
-    let abx = bx - ax;
-    let aby = by - ay;
-    let len2 = abx * abx + aby * aby;
-    let t = (((px - ax) * abx + (py - ay) * aby) / len2).clamp(0.0, 1.0);
-    let cx = ax + t * abx;
-    let cy = ay + t * aby;
-    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
 }
 
 /// 创建 App 状态与全部子控件，加载持久化数据并恢复上次状态
@@ -381,6 +345,8 @@ pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
         font: 0,
         font_strike: 0,
         font_title: 0,
+        font_todo: 0,
+        font_todo_strike: 0,
         notes: Vec::new(),
         cur_note: None,
         note_dirty: false,
@@ -461,6 +427,9 @@ pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
         let font = util::create_ui_font(false);
         let font_strike = util::create_ui_font(true);
         let font_title = util::create_font_title();
+        // 待办列表正文 13px：与 Tab 字号一致，比 12px 界面字体更舒展
+        let font_todo = util::create_font_px(-13, 400, false);
+        let font_todo_strike = util::create_font_px(-13, 400, true);
         let input_line_h = util::font_line_height(font);
         for h in [todo_input, todo_add, todo_list, todo_clear, settings_btn, note_list, note_new, editor] {
             util::apply_font(h, font);
@@ -490,6 +459,8 @@ pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
             app.font = font;
             app.font_strike = font_strike;
             app.font_title = font_title;
+            app.font_todo = font_todo;
+            app.font_todo_strike = font_todo_strike;
             app.btn_states = vec![
                 (todo_add, false, false),
                 (todo_clear, false, false),
@@ -1168,9 +1139,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 util::destroy_font(app.font);
                 util::destroy_font(app.font_strike);
                 util::destroy_font(app.font_title);
+                util::destroy_font(app.font_todo);
+                util::destroy_font(app.font_todo_strike);
                 app.font = 0;
                 app.font_strike = 0;
                 app.font_title = 0;
+                app.font_todo = 0;
+                app.font_todo_strike = 0;
             });
             notes::cleanup_pin_assets();
             tray::remove(hwnd);

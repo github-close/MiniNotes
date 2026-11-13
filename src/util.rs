@@ -38,16 +38,21 @@ pub fn apply_font(hwnd: HWND, font: HFONT) {
     unsafe { SendMessageW(hwnd, WM_SETFONT, font as usize, 1) };
 }
 
-/// 创建界面字体（9pt）。strike=true 时带删除线（待办完成态）。
+/// 创建界面字体（12px 像素高）。strike=true 时带删除线（待办完成态）。
 pub fn create_ui_font(strike: bool) -> HFONT {
+    create_font_px(-12, 400, strike)
+}
+
+/// 指定像素高度与字重创建界面字体（高度取负值 = 字符高度，不含行距）
+pub fn create_font_px(height: i32, weight: i32, strike: bool) -> HFONT {
     let face = wide(UI_FONT_FACE);
     unsafe {
         CreateFontW(
-            -12,
+            height,
             0,
             0,
             0,
-            400,
+            weight,
             0,
             0,
             strike as u32,
@@ -63,10 +68,7 @@ pub fn create_ui_font(strike: bool) -> HFONT {
 
 /// 标题/Tab 用小号半粗字体
 pub fn create_font_title() -> HFONT {
-    let face = wide(UI_FONT_FACE);
-    unsafe {
-        CreateFontW(-13, 0, 0, 0, 600, 0, 0, 0, 0, 0, 0, 5, 0, face.as_ptr())
-    }
+    create_font_px(-13, 600, false)
 }
 
 /// 字体一行的高度（tmHeight + tmExternalLeading），供布局按行高定位控件

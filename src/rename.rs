@@ -104,7 +104,12 @@ pub fn start(app: &mut App, target: Target, text: &str) {
     if edit == 0 {
         return;
     }
-    apply_font(edit, app.font);
+    // 行内编辑字体跟随所在列表的行文字（待办 13px / 笔记 12px）
+    let font = match target {
+        Target::Todo(_) => app.font_todo,
+        Target::Note(_) => app.font,
+    };
+    apply_font(edit, font);
     // 挂系统主题类：暗色下光标用浅色（默认 EDIT 光标近黑，深底上不可见）；
     // 背景文字配色由列表子类的 WM_CTLCOLOREDIT 接管（见 window.rs child_subclass）
     let theme_name = if app.dark { "DarkMode_Explorer" } else { "Explorer" };
@@ -129,7 +134,7 @@ pub fn start(app: &mut App, target: Target, text: &str) {
     // 粘贴换行由 WM_CHAR/WM_PASTE 拦截与 commit 兜底折叠，不会真的成为多行
     let mut crc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     unsafe { GetClientRect(edit, &mut crc) };
-    let line_h = crate::util::font_line_height(app.font);
+    let line_h = crate::util::font_line_height(font);
     let fr = RECT {
         left: 0,
         top: (crc.bottom - line_h) / 2,

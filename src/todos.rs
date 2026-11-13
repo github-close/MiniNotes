@@ -256,7 +256,7 @@ pub fn on_custom_draw(app: &App, nm: &NMLVCUSTOMDRAW) -> LRESULT {
                 // 空状态提示
                 if lv_count(lv) == 0 {
                     let hint = "还没有待办。在上方输入，回车添加";
-                    crate::util::draw_hint_centered(nm.nmcd.hdc, &rc, hint, p.text_sec, app.font);
+                    crate::util::draw_hint_centered(nm.nmcd.hdc, &rc, hint, p.text_sec, app.font_todo);
                 }
                 CDRF_DODEFAULT as LRESULT
             }
@@ -301,10 +301,10 @@ pub fn on_custom_draw(app: &App, nm: &NMLVCUSTOMDRAW) -> LRESULT {
                 let text = app.todos.get(idx).map(|t| t.text.clone()).unwrap_or_default();
                 let mut tr = RECT { left: rc.left + 30, top: rc.top, right: rc.right - 8, bottom: rc.bottom };
                 if done {
-                    SelectObject(nm.nmcd.hdc, app.font_strike);
+                    SelectObject(nm.nmcd.hdc, app.font_todo_strike);
                     SetTextColor(nm.nmcd.hdc, p.text_disabled);
                 } else {
-                    SelectObject(nm.nmcd.hdc, app.font);
+                    SelectObject(nm.nmcd.hdc, app.font_todo);
                     SetTextColor(nm.nmcd.hdc, p.text);
                 }
                 SetBkMode(nm.nmcd.hdc, TRANSPARENT as i32);
