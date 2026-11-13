@@ -24,6 +24,8 @@ const EM_SETMARGINS: u32 = 0x00D3;
 const EM_SETRECT: u32 = 0x00B3;
 /// 替换选区（windows-sys 未导出）：粘贴过滤后的文本用
 const EM_REPLACESEL: u32 = 0x00C2;
+/// 设置选区（windows-sys 未导出）：编辑框打开时全选初始文本
+const EM_SETSEL: u32 = 0x00B1;
 /// CF_UNICODETEXT = 13（标准剪贴板格式，ABI 稳定值）
 const CF_TEXT_UNICODE: u32 = 13;
 
@@ -117,6 +119,9 @@ pub fn start(app: &mut App, target: Target, text: &str) {
     unsafe { SendMessageW(edit, EM_SETMARGINS, 3, (2 | (4 << 16)) as LPARAM) };
     crate::window::set_rename_subclass(edit);
     unsafe { SetFocus(edit) };
+    // 显式全选初始文本：新建后的命名、双击重命名都键入即整体替换
+    // （全选若依赖 EDIT 首次获焦的附带行为则不保证发生，键入会变成在行首插入）
+    unsafe { SendMessageW(edit, EM_SETSEL, 0, -1) };
     // 文字垂直居中：单行 EDIT 永远在控件顶部画文本，框体高于一行时文字浮在上部。
     // EM_SETRECT 只对多行 EDIT 生效，故以 ES_MULTILINE 创建（配 AUTOHSCROLL 仍为
     // 单行水平滚动、不换行）。注意必须在最后发送：WM_SETFONT / SetFocus 等都会

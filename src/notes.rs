@@ -5,7 +5,8 @@ use windows_sys::Win32::UI::Controls::{
     CDDS_ITEMPREPAINT, CDDS_POSTPAINT, CDDS_PREPAINT, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW,
     CDRF_NOTIFYPOSTPAINT, LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS,
     LVM_ENSUREVISIBLE, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMSTATE, LVM_GETNEXTITEM,
-    LVM_INSERTITEMW, LVM_SETITEMSTATE, LVIS_SELECTED, LVNI_SELECTED, NMLVCUSTOMDRAW,
+    LVM_INSERTITEMW, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVIS_SELECTED, LVNI_SELECTED,
+    NMLVCUSTOMDRAW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, SendMessageW, SetWindowTextW, MB_OKCANCEL};
@@ -62,7 +63,9 @@ fn mtime_of(path: &std::path::Path) -> u64 {
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
+        // 毫秒精度：秒精度下“保存上一笔记”与“写入新文件”几乎必落在同一秒，
+        // 排序并列会退回目录读取顺序（近似随机），新建笔记插不到列表最顶上
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 
@@ -82,6 +85,17 @@ fn lv_insert(lv: HWND, idx: i32, text: &str) {
     item.iItem = idx;
     item.pszText = w.as_mut_ptr();
     unsafe { SendMessageW(lv, LVM_INSERTITEMW, 0, &mut item as *mut _ as LPARAM) };
+}
+
+/// 原地更新列表项标题（重命名提交用）：位置不重排，只改文字，
+/// 与资源管理器一致；否则提交后列表还挂着旧标题直到下一次 refresh
+fn lv_set_text(lv: HWND, idx: i32, text: &str) {
+    let mut w = wide(text);
+    let mut item: LVITEMW = unsafe { std::mem::zeroed() };
+    item.mask = LVIF_TEXT;
+    item.iItem = idx;
+    item.pszText = w.as_mut_ptr();
+    unsafe { SendMessageW(lv, LVM_SETITEMTEXTW, idx as WPARAM, &mut item as *mut _ as LPARAM) };
 }
 
 fn lv_select(lv: HWND, idx: i32) {
@@ -279,7 +293,7 @@ pub fn save_current(app: &mut App) {
     let _ = std::fs::write(path, text);
     app.notes[idx].mtime = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     app.note_dirty = false;
 }
@@ -334,6 +348,12 @@ pub fn create_note(app: &mut App) {
     let filename = format!("{title}.md");
     let _ = std::fs::write(dir().join(&filename), "");
     refresh_keep(app, &filename);
+    // 直接在列表项上进入命名：编辑框全选默认名，键入即整体替换
+    // （Enter 提交新名；Esc 取消则保留默认名，与资源管理器一致）
+    if let Some(idx) = app.notes.iter().position(|m| m.filename == filename) {
+        crate::rename::start(app, crate::rename::Target::Note(idx), &title);
+        return;
+    }
     unsafe { SetFocus(app.editor) };
 }
 
@@ -436,6 +456,7 @@ pub fn apply_rename(app: &mut App, idx: usize, new_text: &str) -> bool {
         return false;
     }
     app.notes[idx].filename = new_name.clone();
+    lv_set_text(app.note_list, idx as i32, &new_title);
     if app.cur_note == Some(idx) {
         app.cfg.last_note = new_name;
         update_title(app);
