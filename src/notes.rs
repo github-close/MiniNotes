@@ -14,7 +14,9 @@ use windows_sys::Win32::UI::Controls::{
     NMLVCUSTOMDRAW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
-use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, SendMessageW, SetWindowTextW, MB_OKCANCEL};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    MessageBoxW, SendMessageW, SetWindowTextW, MB_OKCANCEL, SB_TOP, WM_VSCROLL,
+};
 
 use crate::theme;
 use crate::util::{get_text, set_text, wide};
@@ -613,6 +615,9 @@ pub fn load_by_index(app: &mut App, idx: usize) {
     app.suppress_notify = true;
     set_text(app.editor, &text);
     app.suppress_notify = false;
+    // 载入一篇笔记 = 全新查看：滚回顶部。SB_TOP 只滚动视图不动光标/选区，
+    // 紧接着的打字仍落在原光标位置（EM_SCROLLCARET 会把视图带回光标处）
+    unsafe { SendMessageW(app.editor, WM_VSCROLL, SB_TOP as usize, 0) };
     app.note_dirty = false;
     app.cfg.last_note = app.notes[idx].filename.clone();
     update_title(app);

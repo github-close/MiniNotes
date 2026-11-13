@@ -10,7 +10,8 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::UI::Controls::{
     ImageList_Add, ImageList_Create, LVM_SETIMAGELIST, LVM_GETTOOLTIPS,
-    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETTEXTCOLOR, LVM_SETTEXTBKCOLOR, ILC_COLOR32,
+    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETTEXTCOLOR, LVM_SETTEXTBKCOLOR, LVM_ENSUREVISIBLE,
+    ILC_COLOR32,
     LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_NOCOLUMNHEADER, LVS_REPORT, LVS_SHOWSELALWAYS,
     LVIF_STATE, LVIS_SELECTED, LVSIL_SMALL, WM_MOUSELEAVE, DRAWITEMSTRUCT, NMHDR, ODS_SELECTED,
     NMLISTVIEW, NMLVCUSTOMDRAW,
@@ -39,6 +40,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_NOTIFY, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SIZE, WM_SYSKEYDOWN,
     WM_TIMER, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
     WS_VSCROLL, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME, WS_CLIPCHILDREN,
+    WM_VSCROLL, SB_TOP,
 };
 
 use crate::config::Config;
@@ -501,6 +503,13 @@ pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
             app.initialized = true;
             switch_tab(app, t);
             layout(app);
+            // 启动时笔记列表回到最顶：上面的 refresh 恢复选中时带
+            // ENSUREVISIBLE，但当时列表还未布局（0 高），按假视口算出的滚动
+            // 偏移在 layout 后残留——表现为打开软件列表停在选中项位置
+            // （选中项在深处时就是「拉到最下面」），置顶笔记被挤出视野。
+            // 列表有真实尺寸后回首行，顺带覆盖 last_note 在列表深处时
+            // ENSUREVISIBLE 主动下滚的情况（打开 = 从头浏览）
+            SendMessageW(app.note_list, LVM_ENSUREVISIBLE, 0, 0);
         });
     }
 }
@@ -706,6 +715,12 @@ pub fn show_main() {
         }
         SetForegroundWindow(app.hwnd);
         focus_page(app);
+        // 每次唤起编辑器回到顶部：控件常驻（窗口隐藏/显示不销毁），上次停在
+        // 底部则下次唤起仍在底部，阅读总得再滚回去。SB_TOP 只滚动视图不动
+        // 光标——唤起后打字仍落在原位置（ES_AUTOVSCROLL 会把视图带回光标处）
+        if app.cur_tab != TAB_TODO {
+            SendMessageW(app.editor, WM_VSCROLL, SB_TOP as usize, 0);
+        }
     });
 }
 
