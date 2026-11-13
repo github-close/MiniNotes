@@ -34,6 +34,10 @@ pub struct TodoItem {
     pub text: String,
     pub done: bool,
     pub created: u64,
+    /// 底色标记：0 = 无底色，1..=theme::TODO_FILL_N 为语义色索引（渲染时按
+    /// 主题解析实际色值）。serde default 兼容无此字段的旧 todos.json
+    #[serde(default)]
+    pub color: u8,
 }
 
 // ---------- 自绘列表的布局常量 ----------
@@ -90,20 +94,21 @@ pub fn save(items: &[TodoItem]) {
 // ---------- 自绘列表窗口 ----------
 
 /// 勾选框图标条像素：与笔记列表 imagelist 同源（make_todo_checkboxes.py 烘焙，
-/// 3 格 24x26 横排：0 纯底 / 1 未完成圆环 / 2 完成对勾，浅暗主题各一份）。
+/// 3 格 24x26 横排：0 纯底 / 1 未完成圆环 / 2 完成对勾，三主题各一份）。
 /// 这里不再走 ImageList，直接建 memory DC 后按格 AlphaBlend 贴图
 static TODO_ICONS_LIGHT: &[u8] = include_bytes!("../assets/brand/todo-icons-light.bin");
 static TODO_ICONS_DARK: &[u8] = include_bytes!("../assets/brand/todo-icons-dark.bin");
+static TODO_ICONS_YELLOW: &[u8] = include_bytes!("../assets/brand/todo-icons-yellow.bin");
 
-// 图标条 DC 缓存（每主题一份），WM_DESTROY 时 cleanup_assets 释放
-static mut STRIP_DC: [isize; 2] = [0; 2];
-static mut STRIP_BMP: [isize; 2] = [0; 2];
+// 图标条 DC 缓存（每主题一份：0 浅 / 1 暗 / 2 黄），WM_DESTROY 时 cleanup_assets 释放
+static mut STRIP_DC: [isize; 3] = [0; 3];
+static mut STRIP_BMP: [isize; 3] = [0; 3];
 
 /// WM_DESTROY 时释放图标条资源
 pub fn cleanup_assets() {
     unsafe {
         let (dc, bmp) = (std::ptr::addr_of_mut!(STRIP_DC), std::ptr::addr_of_mut!(STRIP_BMP));
-        for i in 0..2 {
+        for i in 0..3 {
             if (*dc)[i] != 0 {
                 DeleteDC((*dc)[i]);
                 (*dc)[i] = 0;
@@ -116,10 +121,13 @@ pub fn cleanup_assets() {
     }
 }
 
-/// 惰性创建 idx 主题的图标条 memory DC（72x26 DIB，内容 = bin 整块拷贝）
-unsafe fn strip_dc(hdc: isize, dark: bool) -> isize {
-    let idx = dark as usize;
-    let bin = if dark { TODO_ICONS_DARK } else { TODO_ICONS_LIGHT };
+/// 惰性创建 t 主题的图标条 memory DC（72x26 DIB，内容 = bin 整块拷贝）
+unsafe fn strip_dc(hdc: isize, t: theme::Theme) -> isize {
+    let (idx, bin) = match t {
+        theme::Theme::Dark => (1, TODO_ICONS_DARK),
+        theme::Theme::Yellow => (2, TODO_ICONS_YELLOW),
+        theme::Theme::Light => (0, TODO_ICONS_LIGHT),
+    };
     let (dc, bmp) = (std::ptr::addr_of_mut!(STRIP_DC), std::ptr::addr_of_mut!(STRIP_BMP));
     if (*dc)[idx] == 0 {
         let mut bmi: BITMAPINFO = std::mem::zeroed();
@@ -426,6 +434,7 @@ pub fn add_from_input(app: &mut App) {
             text,
             done: false,
             created: now_secs(),
+            color: 0,
         },
     );
     save(&app.todos);
@@ -482,6 +491,18 @@ fn toggle_at(app: &mut App, idx: usize) {
     invalidate(app);
 }
 
+/// 设置当前选中条目的底色（0 = 无底色，1..=TODO_FILL_N 为色板索引）。
+/// 右键「填充底色」子菜单调用；值不变时不落盘
+pub fn set_selected_color(app: &mut App, color: u8) {
+    if let Some(idx) = app.todo_sel {
+        if idx < app.todos.len() && app.todos[idx].color != color {
+            app.todos[idx].color = color;
+            save(&app.todos);
+            invalidate(app);
+        }
+    }
+}
+
 /// 应用待办编辑（自管理重命名编辑框提交时调用）。返回 true = 已应用
 pub fn apply_edit(app: &mut App, idx: usize, new_text: &str) -> bool {
     if idx >= app.todos.len() {
@@ -498,12 +519,22 @@ pub fn apply_edit(app: &mut App, idx: usize, new_text: &str) -> bool {
 }
 
 /// 绘制单个条目（勾选框 + 换行文字 + 选中胶囊），y = 条目顶部客户区 y
-unsafe fn draw_item(mem: isize, app: &App, idx: usize, y: i32, cw: i32, dark: bool) {
-    let p = theme::palette(dark);
+unsafe fn draw_item(mem: isize, app: &App, idx: usize, y: i32, cw: i32, th: theme::Theme) {
+    let p = theme::palette(th);
     let Some(t) = app.todos.get(idx) else { return };
     let h = item_height(app, idx, cw);
     let selected = app.todo_sel == Some(idx);
-    if selected {
+    if t.color != 0 {
+        // 底色胶囊（右键「填充底色」标记）：底色取代选中淡底，选中反馈改为
+        // 1px 强调色描边——胶囊被选中时仍有清晰的视觉区分
+        theme::fill_round(
+            mem,
+            RECT { left: 2, top: y, right: cw - 2, bottom: y + h - 1 },
+            6.0,
+            Some(theme::todo_fill((t.color - 1) as usize, th)),
+            if selected { Some((p.accent, 1.0)) } else { None },
+        );
+    } else if selected {
         theme::fill_round(
             mem,
             RECT { left: 2, top: y, right: cw - 2, bottom: y + h - 1 },
@@ -513,8 +544,9 @@ unsafe fn draw_item(mem: isize, app: &App, idx: usize, y: i32, cw: i32, dark: bo
         );
     }
     // 勾选框：图标条 cell 1（未完成圆环）/ cell 2（完成对勾），24x26 贴在
-    // 条目左侧垂直居中（cell 自带行背景色底，与列表底色一致，视觉无缝）
-    let strip = strip_dc(mem, dark);
+    // 条目左侧垂直居中。图标底全透明（预乘 alpha=0，见 make_todo_checkboxes.py），
+    // 默认底色与填充底色上都无缝
+    let strip = strip_dc(mem, th);
     if strip != 0 {
         let cell = if t.done { 2 } else { 1 };
         let bf = BLENDFUNCTION {
@@ -598,7 +630,7 @@ unsafe extern "system" fn todo_list_wndproc(
                 let mem = CreateCompatibleDC(hdc);
                 let bmp = CreateCompatibleBitmap(hdc, cw, ch);
                 let old_bmp = SelectObject(mem, bmp);
-                let p = theme::palette(app.dark);
+                let p = theme::palette(app.theme);
                 let bg = CreateSolidBrush(p.window_bg);
                 FillRect(mem, &rc, bg);
                 DeleteObject(bg);
@@ -617,7 +649,7 @@ unsafe extern "system" fn todo_list_wndproc(
                     for i in 0..app.todos.len() {
                         let h = item_height(app, i, cw);
                         if y + h > 0 && y < ch {
-                            draw_item(mem, app, i, y, cw, app.dark);
+                            draw_item(mem, app, i, y, cw, app.theme);
                         }
                         y += h;
                         if y >= ch {
@@ -754,8 +786,8 @@ unsafe extern "system" fn todo_list_wndproc(
             let hdc = wp as isize;
             let brush = with_app(|app| unsafe {
                 SetBkMode(hdc, TRANSPARENT as i32);
-                SetTextColor(hdc, theme::palette(app.dark).text);
-                SetBkColor(hdc, theme::palette(app.dark).surface2);
+                SetTextColor(hdc, theme::palette(app.theme).text);
+                SetBkColor(hdc, theme::palette(app.theme).surface2);
                 app.brushes.surface2
             });
             brush as LRESULT

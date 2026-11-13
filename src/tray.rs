@@ -64,12 +64,16 @@ pub fn show_menu(hwnd: HWND, autostart_on: bool) -> u32 {
         text: text.to_string(),
         sep: false,
         checked,
+        swatch: None,
+        sub: None,
     };
     let sep = || Item {
         id: 0,
         text: String::new(),
         sep: true,
         checked: false,
+        swatch: None,
+        sub: None,
     };
     let items = vec![
         item(CMD_OPEN, "打开主界面", false),
@@ -80,6 +84,6 @@ pub fn show_menu(hwnd: HWND, autostart_on: bool) -> u32 {
         sep(),
         item(CMD_QUIT, "退出", false),
     ];
-    let dark = crate::window::with_app(|app| app.dark);
-    menu::show(hwnd, dark, &items)
+    let theme = crate::window::with_app(|app| app.theme);
+    menu::show(hwnd, theme, &items)
 }

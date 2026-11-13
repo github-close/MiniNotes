@@ -90,6 +90,9 @@ const M_NOTE_PIN: u32 = 2004;
 const M_TODO_EDIT: u32 = 2101;
 const M_TODO_DELETE: u32 = 2102;
 const M_TODO_CLEAR: u32 = 2103;
+const M_TODO_COLOR: u32 = 2104;       // 「填充底色」入口（弹二级色板菜单）
+const M_TODO_COLOR_NONE: u32 = 2105;  // 二级菜单：无底色
+const M_TODO_COLOR_BASE: u32 = 2106;  // 二级菜单：色板索引 0..TODO_FILL_N 的首 id
 
 const VK_N: u32 = 0x4E;
 
@@ -135,8 +138,8 @@ pub struct App {
     pub settings_open: bool,
     pub initialized: bool,
 
-    // 主题
-    pub dark: bool,
+    // 主题（取色一律 palette(theme)；is_dark 只驱动系统部件明暗）
+    pub theme: theme::Theme,
     pub brushes: theme::Brushes,
     // 自绘状态
     pub cur_tab: usize,
@@ -284,10 +287,15 @@ fn child(parent: HWND, class: &str, text: &str, style: u32, exstyle: u32, id: u3
 // 挂到笔记列表只为把行高撑到 26px——笔记行从不绘制图标，内容不参与渲染
 static TODO_ICONS_LIGHT: &[u8] = include_bytes!("../assets/brand/todo-icons-light.bin");
 static TODO_ICONS_DARK: &[u8] = include_bytes!("../assets/brand/todo-icons-dark.bin");
+static TODO_ICONS_YELLOW: &[u8] = include_bytes!("../assets/brand/todo-icons-yellow.bin");
 
 /// 26px 高的小图列表：挂到笔记列表上把行高撑起来
-fn make_checkbox_imagelist(dark: bool) -> isize {
-    let bin = if dark { TODO_ICONS_DARK } else { TODO_ICONS_LIGHT };
+fn make_checkbox_imagelist(t: theme::Theme) -> isize {
+    let bin = match t {
+        theme::Theme::Dark => TODO_ICONS_DARK,
+        theme::Theme::Yellow => TODO_ICONS_YELLOW,
+        theme::Theme::Light => TODO_ICONS_LIGHT,
+    };
     unsafe {
         let himl = ImageList_Create(24, 26, ILC_COLOR32, 3, 1);
         // 72x26 的图标条（3 格横排）一次 ImageList_Add，按 cx=24 自动切成 3 张
@@ -326,9 +334,9 @@ fn make_checkbox_imagelist(dark: bool) -> isize {
 /// 创建 App 状态与全部子控件，加载持久化数据并恢复上次状态
 pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
     let todos_data = todos::load();
-    let dark = theme::resolve_dark(&cfg.theme);
+    let t = theme::resolve(&cfg.theme);
     let mut brushes = theme::Brushes::new();
-    brushes.rebuild(dark);
+    brushes.rebuild(t);
     // 弹出菜单（列表右键/托盘）暗色除进程级 PreferredAppMode 外，
     // 还要求 owner 窗口允许暗色，缺一则菜单保持系统浅色
     theme::allow_dark_chrome(hwnd);
@@ -360,7 +368,7 @@ pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
         todo_line_h: 0,
         settings_open: false,
         initialized: false,
-        dark,
+        theme: t,
         brushes,
         cur_tab: 1,
         hover_tab: -1,
@@ -528,18 +536,18 @@ pub fn apply_editor_font(app: &mut App) {
 
 /// 解析主题并应用到全部控件（画刷、图标列表、系统主题字符串）
 pub fn apply_theme(app: &mut App) {
-    let dark = theme::resolve_dark(&app.cfg.theme);
-    app.dark = dark;
-    app.brushes.rebuild(dark);
+    let t = theme::resolve(&app.cfg.theme);
+    app.theme = t;
+    app.brushes.rebuild(t);
     // 总开关先行：不开它，DarkMode_Explorer 的部件（列表底/滚动条/光标/菜单）
-    // 仍按浅色渲染（见 theme.rs set_system_dark 说明）
-    theme::set_system_dark(dark);
+    // 仍按浅色渲染（见 theme.rs set_system_dark 说明）。浅黄按浅色系
+    theme::set_system_dark(t.is_dark());
     unsafe {
         editor_set_margin(app.editor, 10, 8);
 
         // 列表：背景 / 文字 / 文字底透明；滚动条跟随系统暗色主题
         // EDIT（编辑器/待办输入框）：暗色滚动条与光标
-        let theme_name = if dark { "DarkMode_Explorer" } else { "Explorer" };
+        let theme_name = if t.is_dark() { "DarkMode_Explorer" } else { "Explorer" };
         for h in [app.editor, app.todo_input] {
             windows_sys::Win32::UI::Controls::SetWindowTheme(
                 h,
@@ -548,7 +556,7 @@ pub fn apply_theme(app: &mut App) {
             );
         }
         let old_himl = app.himl;
-        let himl = make_checkbox_imagelist(dark);
+        let himl = make_checkbox_imagelist(t);
         app.himl = himl;
         // 自绘待办列表不用 imagelist（勾选框由 todos.rs 直接贴烘焙图标条），
         // 它挂载在笔记列表上承担「撑行高到 26px」的结构职责
@@ -561,7 +569,7 @@ pub fn apply_theme(app: &mut App) {
         // 不发送 LVM_SETBKCOLOR：实测（Win10 19045 comctl32 6.10）发送过该消息后，
         // 内联重命名 LVM_EDITLABELW 会在 comctl32 内部触发访问违例（进程闪退）。
         // 列表背景由主题绘制与自绘覆盖，这条消息没有实际作用。
-        SendMessageW(app.note_list, LVM_SETTEXTCOLOR, 0, theme::palette(dark).text as LPARAM);
+        SendMessageW(app.note_list, LVM_SETTEXTCOLOR, 0, theme::palette(t).text as LPARAM);
         SendMessageW(app.note_list, LVM_SETTEXTBKCOLOR, 0, CLR_NONE as LPARAM);
         windows_sys::Win32::UI::Controls::SetWindowTheme(
             app.note_list,
@@ -804,7 +812,7 @@ unsafe fn paint(hwnd: HWND) {
         let bmp = CreateCompatibleBitmap(hdc, w, h);
         let old_bmp = SelectObject(mem, bmp);
 
-        let p = theme::palette(app.dark);
+        let p = theme::palette(app.theme);
         let bg_brush = CreateSolidBrush(p.window_bg);
         FillRect(mem, &RECT { left: 0, top: 0, right: w, bottom: h }, bg_brush);
         DeleteObject(bg_brush);
@@ -1089,8 +1097,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         text,
                         kind,
                         hov,
-                        down || ((*di).itemState & ODS_SELECTED != 0),
-                        app.dark,
+                            down || ((*di).itemState & ODS_SELECTED != 0),
+                            app.theme,
                         app.font,
                         align,
                     );
@@ -1104,8 +1112,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let hdc = wp as HDC;
             with_app(|app| unsafe {
                 SetBkMode(hdc, TRANSPARENT as i32);
-                SetTextColor(hdc, theme::palette(app.dark).text);
-                windows_sys::Win32::Graphics::Gdi::SetBkColor(hdc, theme::palette(app.dark).surface2);
+                SetTextColor(hdc, theme::palette(app.theme).text);
+                windows_sys::Win32::Graphics::Gdi::SetBkColor(hdc, theme::palette(app.theme).surface2);
                 app.brushes.surface2
             })
         }
@@ -1113,8 +1121,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let hdc = wp as HDC;
             with_app(|app| unsafe {
                 SetBkMode(hdc, TRANSPARENT as i32);
-                SetTextColor(hdc, theme::palette(app.dark).text_sec);
-                windows_sys::Win32::Graphics::Gdi::SetBkColor(hdc, theme::palette(app.dark).window_bg);
+                SetTextColor(hdc, theme::palette(app.theme).text_sec);
+                windows_sys::Win32::Graphics::Gdi::SetBkColor(hdc, theme::palette(app.theme).window_bg);
                 app.brushes.window_bg
             })
         }
@@ -1122,8 +1130,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             // 系统"跟随"主题：设置变化时重新解析
             with_app(|app| {
                 if app.cfg.theme == "system" {
-                    let dark = theme::resolve_dark("system");
-                    if dark != app.dark {
+                    let t = theme::resolve("system");
+                    if t != app.theme {
                         apply_theme(app);
                     }
                 }
@@ -1385,10 +1393,12 @@ fn popup_at(hwnd: HWND, items: &[(u32, &str, bool)]) -> u32 {
             text: (*text).to_string(),
             sep: *sep,
             checked: false,
+            swatch: None,
+            sub: None,
         })
         .collect();
-    let dark = with_app(|app| app.dark);
-    crate::menu::show(hwnd, dark, &list)
+    let theme = with_app(|app| app.theme);
+    crate::menu::show(hwnd, theme, &list)
 }
 
 fn note_ctx_menu(hwnd: HWND) {
@@ -1419,18 +1429,72 @@ fn note_ctx_menu(hwnd: HWND) {
 }
 
 pub(crate) fn todo_ctx_menu(hwnd: HWND) {
-    match popup_at(
-        hwnd,
-        &[
-            (M_TODO_EDIT, "编辑", false),
-            (M_TODO_DELETE, "删除", false),
-            (0, "", true),
-            (M_TODO_CLEAR, "清除已完成", false),
-        ],
-    ) {
+    // 右键时列表已把光标下的条目设为选中（todos.rs WM_RBUTTONDOWN），
+    // 菜单（含「填充底色」子菜单）作用于 todo_sel
+    let (theme, cur) = with_app(|app| {
+        (
+            app.theme,
+            app.todo_sel
+                .and_then(|i| app.todos.get(i))
+                .map(|t| t.color)
+                .unwrap_or(0),
+        )
+    });
+    let item = |id: u32, text: &str| crate::menu::Item {
+        id,
+        text: text.to_string(),
+        sep: false,
+        checked: false,
+        swatch: None,
+        sub: None,
+    };
+    let sep = || crate::menu::Item {
+        id: 0,
+        text: String::new(),
+        sep: true,
+        checked: false,
+        swatch: None,
+        sub: None,
+    };
+    // 「填充底色」子菜单：色名行尾画实际色块，当前色打勾（hover 宿主行弹出）
+    const NAMES: [&str; crate::theme::TODO_FILL_N] = ["红", "橙", "黄", "绿", "青", "蓝", "紫"];
+    let mut colors = Vec::with_capacity(crate::theme::TODO_FILL_N + 1);
+    colors.push(crate::menu::Item {
+        id: M_TODO_COLOR_NONE,
+        text: "无底色".to_string(),
+        sep: false,
+        checked: cur == 0,
+        swatch: None,
+        sub: None,
+    });
+    for (i, name) in NAMES.iter().enumerate() {
+        colors.push(crate::menu::Item {
+            id: M_TODO_COLOR_BASE + i as u32,
+            text: (*name).to_string(),
+            sep: false,
+            checked: cur == (i + 1) as u8,
+            swatch: Some(crate::theme::todo_fill(i, theme)),
+            sub: None,
+        });
+    }
+    let mut color_entry = item(M_TODO_COLOR, "填充底色");
+    color_entry.sub = Some(colors);
+    let items = vec![
+        item(M_TODO_EDIT, "编辑"),
+        color_entry,
+        item(M_TODO_DELETE, "删除"),
+        sep(),
+        item(M_TODO_CLEAR, "清除已完成"),
+    ];
+    match crate::menu::show(hwnd, theme, &items) {
         M_TODO_EDIT => with_app(todos::begin_edit),
-        M_TODO_DELETE => with_app(todos::delete_selected),
-        M_TODO_CLEAR => with_app(todos::clear_done),
+        M_TODO_COLOR_NONE => with_app(|app| todos::set_selected_color(app, 0)),
+        id if (M_TODO_COLOR_BASE..M_TODO_COLOR_BASE + crate::theme::TODO_FILL_N as u32)
+            .contains(&id) =>
+        {
+            let idx = (id - M_TODO_COLOR_BASE) as u8;
+            with_app(move |app| todos::set_selected_color(app, idx + 1));
+        }
         _ => {}
     }
 }
@@ -1601,7 +1665,7 @@ unsafe extern "system" fn child_subclass(
         match msg {
             WM_ERASEBKGND => {
                 with_app(|app| unsafe {
-                    let p = theme::palette(app.dark);
+                    let p = theme::palette(app.theme);
                     let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
                     GetClientRect(hwnd, &mut rc);
                     let b = CreateSolidBrush(p.window_bg);
@@ -1613,7 +1677,7 @@ unsafe extern "system" fn child_subclass(
             WM_CTLCOLOREDIT => {
                 let hdc = wp as HDC;
                 let brush = with_app(|app| unsafe {
-                    let p = theme::palette(app.dark);
+                    let p = theme::palette(app.theme);
                     SetBkMode(hdc, TRANSPARENT as i32);
                     SetTextColor(hdc, p.text);
                     windows_sys::Win32::Graphics::Gdi::SetBkColor(hdc, p.surface2);

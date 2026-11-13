@@ -1,4 +1,4 @@
-//! 设计系统：浅色/暗色双主题色板、GDI+ 圆角绘制、扁平按钮绘制。
+//! 设计系统：浅色/暗色/浅黄三主题色板、GDI+ 圆角绘制、扁平按钮绘制。
 //!
 //! 设计原则（贯穿所有界面）：
 //! - 一套强调色 + 中性灰阶，克制用色；选中/主操作用强调色，其余一律中性
@@ -43,6 +43,21 @@ pub fn gdiplus_shutdown(token: GdipToken) {
 }
 
 // ---------- 色板 ----------
+
+/// 三套主题。Yellow 按浅色系渲染一切系统部件（菜单/滚动条/光标/标题栏/comctl
+/// 主题字符串），is_dark 只驱动这类"系统明暗"决策；取色一律走 palette(Theme)
+#[derive(Clone, Copy, PartialEq)]
+pub enum Theme {
+    Light,
+    Dark,
+    Yellow,
+}
+
+impl Theme {
+    pub fn is_dark(self) -> bool {
+        self == Theme::Dark
+    }
+}
 
 pub struct Palette {
     pub window_bg: COLORREF,     // 主背景（窗口/编辑器/列表）
@@ -106,12 +121,86 @@ pub const DARK: Palette = Palette {
     on_danger: rgb(0xFF, 0xFF, 0xFF),
 };
 
-pub fn palette(dark: bool) -> &'static Palette {
-    if dark {
-        &DARK
-    } else {
-        &LIGHT
+/// 浅黄：柔和米黄纸底 + 琥珀金强调，经典便利贴观感。系统部件按浅色渲染，
+/// 故 accent 底上的文字不用白色（琥珀底白字对比度不足），用深棕墨色（同 DARK
+/// 的 on_accent 思路）；中性色全部偏暖，与黄底同族
+pub const YELLOW: Palette = Palette {
+    window_bg: rgb(0xFF, 0xF6, 0xD8),
+    surface2: rgb(0xF7, 0xEC, 0xC9),
+    hover: rgb(0xF2, 0xE4, 0xBB),
+    hairline: rgb(0xEA, 0xDD, 0xB4),
+    edge: rgb(0xD6, 0xC5, 0x92),
+    text: rgb(0x3D, 0x33, 0x1F),
+    text_sec: rgb(0x8A, 0x7A, 0x55),
+    text_disabled: rgb(0xB5, 0xA6, 0x82),
+    accent: rgb(0xE0, 0x9A, 0x00),
+    accent_hover: rgb(0xE8, 0xA8, 0x1A),
+    accent_press: rgb(0xC4, 0x85, 0x00),
+    accent_soft: rgb(0xB2, 0x86, 0x3C),
+    accent_tint: rgb(0xF5, 0xE3, 0xAE),
+    on_accent: rgb(0x2E, 0x26, 0x14),
+    danger: rgb(0xE8, 0x11, 0x23),
+    on_danger: rgb(0xFF, 0xFF, 0xFF),
+};
+
+pub fn palette(t: Theme) -> &'static Palette {
+    match t {
+        Theme::Dark => &DARK,
+        Theme::Yellow => &YELLOW,
+        Theme::Light => &LIGHT,
     }
+}
+
+// ---------- 待办条目底色 ----------
+
+/// 待办条目可选底色种数（语义色：红橙黄绿青蓝紫；todos.json 存 索引+1，0 = 无底色）
+pub const TODO_FILL_N: usize = 7;
+
+/// 待办底色按主题各配一套：浅色/浅黄用低饱和粉彩（黑字保持可读），暗色用
+/// 降饱和深底（浅字可读）。红色刻意偏暖（压蓝提黄）避免读成粉色；青的
+/// 绿≥蓝、蓝的蓝>绿，保证相邻色可区分。实际色值取色时才解析（todo_fill），
+/// 数据里只存语义索引
+const TODO_FILLS: [[COLORREF; TODO_FILL_N]; 3] = [
+    // Light
+    [
+        rgb(0xF9, 0xD9, 0xD4),
+        rgb(0xFC, 0xEB, 0xD4),
+        rgb(0xFA, 0xF2, 0xC8),
+        rgb(0xE1, 0xF2, 0xDF),
+        rgb(0xD8, 0xF0, 0xEC),
+        rgb(0xE2, 0xEC, 0xFD),
+        rgb(0xEE, 0xE5, 0xFA),
+    ],
+    // Dark
+    [
+        rgb(0x4C, 0x2B, 0x27),
+        rgb(0x47, 0x3A, 0x28),
+        rgb(0x43, 0x3D, 0x25),
+        rgb(0x2C, 0x41, 0x31),
+        rgb(0x24, 0x45, 0x43),
+        rgb(0x2D, 0x3F, 0x59),
+        rgb(0x3B, 0x32, 0x4B),
+    ],
+    // Yellow
+    [
+        rgb(0xFF, 0xD8, 0xCC),
+        rgb(0xFF, 0xE5, 0xC3),
+        rgb(0xFF, 0xF0, 0xAE),
+        rgb(0xDF, 0xF0, 0xD3),
+        rgb(0xD4, 0xF0, 0xEA),
+        rgb(0xDE, 0xEC, 0xFB),
+        rgb(0xF0, 0xE1, 0xF6),
+    ],
+];
+
+/// 第 idx（0..TODO_FILL_N）种待办底色在该主题下的实际色值
+pub fn todo_fill(idx: usize, t: Theme) -> COLORREF {
+    let ti = match t {
+        Theme::Dark => 1,
+        Theme::Yellow => 2,
+        Theme::Light => 0,
+    };
+    TODO_FILLS[ti][idx.min(TODO_FILL_N - 1)]
 }
 
 // ---------- 系统暗色开关（uxtheme 未公开序号函数，Win10 1809+） ----------
@@ -172,7 +261,7 @@ fn uxtheme() -> Option<&'static UxTheme> {
 
 /// 让系统的暗色部件与弹出菜单按 dark 渲染。用 ForceDark/ForceLight 而非
 /// AllowDark：应用主题是显式三选，即使系统是亮色，选了暗色菜单也必须暗
-/// （"跟随系统"档时 app.dark 本就等于系统值，同样成立）。
+/// （"跟随系统"档时解析出的明暗本就等于系统值，同样成立）。
 pub fn set_system_dark(dark: bool) {
     if let Some(f) = uxtheme() {
         unsafe {
@@ -205,12 +294,20 @@ pub fn allow_dark_chrome(hwnd: isize) {
     }
 }
 
-/// "light"/"dark"/"system" -> 是否暗色。system 读注册表（无该键的老系统按浅色）。
-pub fn resolve_dark(mode: &str) -> bool {
+/// "light"/"dark"/"yellow"/"system" -> Theme。system 读注册表（无该键的老系统
+/// 按浅色），未知值同样回落 system 行为。
+pub fn resolve(mode: &str) -> Theme {
     match mode {
-        "dark" => true,
-        "light" => false,
-        _ => registry_prefers_dark(),
+        "dark" => Theme::Dark,
+        "yellow" => Theme::Yellow,
+        "light" => Theme::Light,
+        _ => {
+            if registry_prefers_dark() {
+                Theme::Dark
+            } else {
+                Theme::Light
+            }
+        }
     }
 }
 
@@ -259,8 +356,8 @@ impl Brushes {
         Brushes { window_bg: 0, surface2: 0 }
     }
 
-    /// 按（暗色与否）重建；旧画刷销毁
-    pub fn rebuild(&mut self, dark: bool) {
+    /// 按（主题）重建；旧画刷销毁
+    pub fn rebuild(&mut self, t: Theme) {
         unsafe {
             if self.window_bg != 0 {
                 DeleteObject(self.window_bg);
@@ -268,7 +365,7 @@ impl Brushes {
             if self.surface2 != 0 {
                 DeleteObject(self.surface2);
             }
-            let pal = palette(dark);
+            let pal = palette(t);
             self.window_bg = CreateSolidBrush(pal.window_bg);
             self.surface2 = CreateSolidBrush(pal.surface2);
         }
@@ -374,11 +471,11 @@ pub fn draw_button(
     kind: BtnKind,
     hover: bool,
     down: bool,
-    dark: bool,
+    t: Theme,
     hfont: isize,
     align: BtnAlign,
 ) {
-    let p = palette(dark);
+    let p = palette(t);
     unsafe {
         // 先铺窗口背景色：圆角外的方形角落不能露出未初始化区域（黑角）。
         // 用普通 GDI 矩形填充；fill_round 半径 0 会让 GDI+ 生成零尺寸圆弧的垃圾路径
