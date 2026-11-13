@@ -15,6 +15,10 @@ pub struct Config {
     pub win_cy: i32,
     pub last_tab: usize,
     pub last_note: String,
+    /// 笔记编辑区字体名（仅编辑器生效，其余界面固定 YaHei UI）
+    pub ed_font: String,
+    /// 笔记编辑区字号（像素字符高度，与界面字号的 px 口径一致）
+    pub ed_size: i32,
 }
 
 impl Default for Config {
@@ -31,6 +35,8 @@ impl Default for Config {
             win_cy: 540,
             last_tab: 1,
             last_note: String::new(),
+            ed_font: "Microsoft YaHei UI".into(),
+            ed_size: 12,
         }
     }
 }
@@ -60,6 +66,16 @@ pub fn load() -> Config {
             "win_cy" => cfg.win_cy = v.parse().unwrap_or(cfg.win_cy),
             "last_tab" => cfg.last_tab = v.parse().unwrap_or(cfg.last_tab),
             "last_note" => cfg.last_note = v.to_string(),
+            "ed_font" => {
+                if !v.is_empty() {
+                    cfg.ed_font = v.to_string();
+                }
+            }
+            "ed_size" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    cfg.ed_size = n.clamp(8, 72);
+                }
+            }
             _ => {}
         }
     }
@@ -68,7 +84,7 @@ pub fn load() -> Config {
 
 pub fn save(cfg: &Config) {
     let text = format!(
-        "hotkey_mods={}\nhotkey_vk={}\nauto_hide={}\nautostart={}\ntheme={}\nwin_x={}\nwin_y={}\nwin_cx={}\nwin_cy={}\nlast_tab={}\nlast_note={}\n",
+        "hotkey_mods={}\nhotkey_vk={}\nauto_hide={}\nautostart={}\ntheme={}\nwin_x={}\nwin_y={}\nwin_cx={}\nwin_cy={}\nlast_tab={}\nlast_note={}\ned_font={}\ned_size={}\n",
         cfg.hotkey_mods,
         cfg.hotkey_vk,
         cfg.auto_hide as u8,
@@ -80,6 +96,8 @@ pub fn save(cfg: &Config) {
         cfg.win_cy,
         cfg.last_tab,
         cfg.last_note,
+        cfg.ed_font,
+        cfg.ed_size,
     );
     let _ = std::fs::write(config_path(), text);
 }

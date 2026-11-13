@@ -122,6 +122,7 @@ pub struct App {
     pub font_title: isize,
     pub font_todo: isize,        // 待办列表文字 13px（正文比界面字体大一号）
     pub font_todo_strike: isize, // 待办完成态 13px 删除线
+    pub font_editor: isize,      // 笔记编辑区独立字体（设置可换，仅 editor 控件挂载）
 
     pub notes: Vec<notes::NoteMeta>,
     pub cur_note: Option<usize>,
@@ -348,6 +349,7 @@ pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
         font_title: 0,
         font_todo: 0,
         font_todo_strike: 0,
+        font_editor: 0,
         notes: Vec::new(),
         cur_note: None,
         note_dirty: false,
@@ -474,6 +476,8 @@ pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
             app.todo_line_h = util::font_line_height(font_todo);
         });
 
+        with_app(apply_editor_font);
+
         with_app(todos::rebuild);
         notes::ensure_first_run();
         with_app(notes::refresh);
@@ -504,6 +508,23 @@ fn insert_column(lv: HWND, cx: i32) {
 }
 
 // ---------- 主题 ----------
+
+/// 按配置重建笔记编辑区字体并挂到 editor 控件（init 与设置保存共用此路径）。
+/// 只影响笔记输入区：标题栏/Tab/列表/待办页仍用各自的界面字体
+pub fn apply_editor_font(app: &mut App) {
+    let face = match app.cfg.ed_font.trim() {
+        "" => util::UI_FONT_FACE.to_string(),
+        f => f.to_string(),
+    };
+    let px = app.cfg.ed_size.clamp(8, 72);
+    let new_font = util::create_font_face_px(&face, -px, 400, false);
+    if new_font != 0 {
+        util::destroy_font(app.font_editor);
+        app.font_editor = new_font;
+        util::apply_font(app.editor, new_font);
+        unsafe { InvalidateRect(app.editor, std::ptr::null(), 0) };
+    }
+}
 
 /// 解析主题并应用到全部控件（画刷、图标列表、系统主题字符串）
 pub fn apply_theme(app: &mut App) {
@@ -1167,11 +1188,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 util::destroy_font(app.font_title);
                 util::destroy_font(app.font_todo);
                 util::destroy_font(app.font_todo_strike);
+                util::destroy_font(app.font_editor);
                 app.font = 0;
                 app.font_strike = 0;
                 app.font_title = 0;
                 app.font_todo = 0;
                 app.font_todo_strike = 0;
+                app.font_editor = 0;
             });
             notes::cleanup_pin_assets();
             todos::cleanup_assets();

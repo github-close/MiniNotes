@@ -5,14 +5,19 @@ use windows_sys::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, AlphaBlend, BeginPaint, BLENDFUNCTION, BITMAPINFO,
     BITMAPINFOHEADER, BI_RGB, CreateCompatibleDC, CreateDIBSection, CreateFontW, DIB_RGB_COLORS,
     DeleteDC, EndPaint, FillRect, GetDC, InvalidateRect, CreateSolidBrush, DeleteObject,
-    PAINTSTRUCT, ReleaseDC, SelectObject,
+    PAINTSTRUCT, ReleaseDC, SelectObject, DEFAULT_CHARSET, DrawTextW, EnumFontFamiliesExW,
+    GetTextFaceW, LOGFONTW, SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT, DT_END_ELLIPSIS,
+    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
     HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
 };
-use windows_sys::Win32::UI::Controls::{SetWindowTheme, BST_CHECKED, DRAWITEMSTRUCT, ODS_SELECTED, WM_MOUSELEAVE};
+use windows_sys::Win32::UI::Controls::{
+    SetWindowTheme, BST_CHECKED, DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODT_COMBOBOX,
+    ODS_COMBOBOXEDIT, ODS_SELECTED, WM_MOUSELEAVE,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, MOD_ALT, MOD_CONTROL, MOD_SHIFT, VK_CONTROL, VK_LWIN, VK_MENU,
     VK_RWIN, VK_SHIFT,
@@ -23,13 +28,18 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect,
     LoadCursorW, MessageBoxW, RegisterClassW, SendMessageW, SetForegroundWindow,
     SetWindowTextW, ShowWindow, SW_SHOW, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CREATE,
-    WM_CTLCOLORSTATIC, WM_CTLCOLOREDIT, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_PAINT,
+    WM_CTLCOLORSTATIC, WM_CTLCOLOREDIT, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_MEASUREITEM,
+    WM_PAINT,
     BM_CLICK, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_SYSKEYDOWN, WS_GROUP,
     WS_CAPTION, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
     ES_MULTILINE, WM_PASTE,
     LoadImageW, GetSystemMetrics, IMAGE_ICON, LR_SHARED, WM_SETICON,
     SM_CXICON, SM_CYICON, SM_CXSMICON, SM_CYSMICON,
     WNDCLASSW, IDC_ARROW,
+    CBS_DROPDOWNLIST, CBS_OWNERDRAWFIXED, CBS_HASSTRINGS,
+    CB_ADDSTRING, CB_SETCURSEL, CB_GETCURSEL,
+    CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_ERR, WM_CTLCOLORLISTBOX, WS_VSCROLL,
+    CBN_DROPDOWN,
 };
 
 use crate::theme::{self, BtnAlign, BtnKind};
@@ -57,8 +67,13 @@ const ST_TAG: u32 = 14;
 const ST_RDL: u32 = 15;
 const ST_RDD: u32 = 16;
 const ST_RDS: u32 = 17;
+// 编辑器字体行（笔记输入区独立字体）
+const ST_EFONT: u32 = 18; // 「编辑器字体：」标签
+const CB_EFONT: u32 = 19; // 字体族下拉
+const CB_ESIZE: u32 = 20; // 字号下拉（可输入）
 const SUB_CAPTURE: usize = 10;
 const SUB_SBTN: usize = 11;
+const SUB_COMBO: usize = 12;
 const SS_NOTIFY: u32 = 0x0100; // windows-sys 0.52 缺失
 const EM_SETRECT: u32 = 0x00B3; // windows-sys 0.52 缺失：设置 EDIT 格式矩形
 
@@ -84,6 +99,10 @@ struct SettingsState {
     hover_cancel: bool,
     down_save: bool,
     down_cancel: bool,
+    // 字体/字号下拉的已提交选中行（-1 = 无）。owner-draw 列表的 ODS_SELECTED
+    // 会跟随鼠标/键盘移动（原生高亮），"当前值"需要自行记录才能画成深色
+    sel_face: i32,
+    sel_size: i32,
     // 打开设置时停用了全局热键（否则当前已注册的组合键会被系统拦截去切换主窗口，
     // 输入框永远捕获不到最后那个主键）。关闭时按此标记恢复注册
     hk_dismissed: bool,
@@ -233,7 +252,7 @@ pub fn open(owner: HWND) {
         RegisterClassW(&wc);
 
         let style = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU) as u32;
-        let mut rc = RECT { left: 0, top: 0, right: 360, bottom: 220 + BANNER_SHIFT };
+        let mut rc = RECT { left: 0, top: 0, right: 360, bottom: 258 + BANNER_SHIFT };
         AdjustWindowRect(&mut rc, style, 0);
         let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
 
@@ -294,6 +313,8 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             let (m, v, auto_hide, theme_mode) = with_app(|app| {
                 (app.cfg.hotkey_mods, app.cfg.hotkey_vk, app.cfg.auto_hide, app.cfg.theme.clone())
             });
+            let (ed_face, ed_size) =
+                with_app(|app| (app.cfg.ed_font.clone(), app.cfg.ed_size));
             let autost = autostart_on();
 
             // 暗色时标题栏跟随（uxtheme 序号 + DWM 属性，老版本自动回退属性 19）
@@ -428,19 +449,50 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 38, 145 + BANNER_SHIFT, 220, 18,
                 ST_AUTO,
             );
-            let btn_save = mk("BUTTON", "保存", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 180, 176 + BANNER_SHIFT, 80, 30, BTN_SAVE);
-            let btn_cancel = mk("BUTTON", "取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 268, 176 + BANNER_SHIFT, 80, 30, BTN_CANCEL);
+            // 编辑器字体行：owner-draw（DarkMode_Explorer 在 Win10 上画不黑 combo
+            // 选字段与列表底，字段/条目改由对话框用色板自绘，见 WM_DRAWITEM；
+            // HASSTRINGS 让 CB_GETLBTEXT 拿回文本）；下拉列表高度参数 = 展开后的总高
+            let st_edfont = mk("STATIC", "编辑器字体：", WS_CHILD | WS_VISIBLE, 14, 176 + BANNER_SHIFT, 78, 18, ST_EFONT);
+            let cb_face = mk(
+                "COMBOBOX",
+                "",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST as u32 | WS_VSCROLL as u32
+                    | CBS_OWNERDRAWFIXED as u32 | CBS_HASSTRINGS as u32,
+                94, 174 + BANNER_SHIFT, 180, 240,
+                CB_EFONT,
+            );
+            let cb_size = mk(
+                "COMBOBOX",
+                "",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST as u32 | WS_VSCROLL as u32
+                    | CBS_OWNERDRAWFIXED as u32 | CBS_HASSTRINGS as u32,
+                280, 174 + BANNER_SHIFT, 62, 240,
+                CB_ESIZE,
+            );
+            let btn_save = mk("BUTTON", "保存", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 180, 214 + BANNER_SHIFT, 80, 30, BTN_SAVE);
+            let btn_cancel = mk("BUTTON", "取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 268, 214 + BANNER_SHIFT, 80, 30, BTN_CANCEL);
 
             util::apply_font(st_title, font_title);
             util::apply_font(st_tag, font);
-            for h in [st_label, ed, st_theme, rd_light, st_rdl, rd_dark, st_rdd, rd_system, st_rds, chk_hide, st_hide, chk_auto, st_auto, st_hint, btn_save, btn_cancel] {
+            for h in [st_label, ed, st_theme, rd_light, st_rdl, rd_dark, st_rdd, rd_system, st_rds, chk_hide, st_hide, chk_auto, st_auto, st_hint, btn_save, btn_cancel, st_edfont, cb_face, cb_size] {
                 util::apply_font(h, font);
             }
 
-            // 复选框/单选钮的图形与热键输入框的光标在暗色下用系统暗色主题绘制（文字由 STATIC 承担）
+            // 复选框/单选钮的图形与热键输入框的光标在暗色下用系统暗色主题绘制（文字由 STATIC 承担）；
+            // ComboBox 挂同款主题，下拉滚动条/箭头跟随暗色（列表配色见 WM_CTLCOLORLISTBOX）
             let theme_name = if dark { "DarkMode_Explorer" } else { "Explorer" };
-            for h in [rd_light, rd_dark, rd_system, chk_hide, chk_auto, ed] {
+            for h in [rd_light, rd_dark, rd_system, chk_hide, chk_auto, ed, cb_face, cb_size] {
                 SetWindowTheme(h, wide(theme_name).as_ptr(), std::ptr::null());
+            }
+
+            // 字体下拉：枚举全部系统字体并预选当前值；字号下拉：预设 + 手输
+            fill_face_combo(cb_face, &ed_face);
+            for s in ED_SIZES {
+                SendMessageW(cb_size, CB_ADDSTRING, 0, wide(&s.to_string()).as_ptr() as isize);
+            }
+            // 预选当前字号（列表里找不到就不预选，应用时保留原值）
+            if let Some(i) = ED_SIZES.iter().position(|&s| s == ed_size) {
+                SendMessageW(cb_size, CB_SETCURSEL, i as usize, 0);
             }
 
             SetWindowTextW(ed, wide(&hotkey::text(m, v)).as_ptr());
@@ -466,6 +518,11 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             send_checked(chk_hide, auto_hide);
             send_checked(chk_auto, autost);
             SetWindowSubclass(ed, Some(capture_proc), SUB_CAPTURE, 0);
+            // ComboBox 的编辑子控件（CBS_DROPDOWN）与下拉列表发出的 CTLCOLOR 消息
+            // 发给 combo 本身：DarkMode_Explorer 主题下 combo 不再转发给对话框，
+            // 对话框的配色臂收不到 → 编辑区留白底。子类转发给对话框取暗色画刷
+            SetWindowSubclass(cb_face, Some(combo_proc), SUB_COMBO, 0);
+            SetWindowSubclass(cb_size, Some(combo_proc), SUB_COMBO, 0);
             SetWindowSubclass(btn_save, Some(sbtn_proc), SUB_SBTN, 0);
             SetWindowSubclass(btn_cancel, Some(sbtn_proc), SUB_SBTN + 1, 0);
 
@@ -485,6 +542,8 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                     hover_cancel: false,
                     down_save: false,
                     down_cancel: false,
+                    sel_face: -1,
+                    sel_size: -1,
                     hk_dismissed: false,
                 })
             });
@@ -543,9 +602,39 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 app.brushes.surface2
             })
         }
+        WM_CTLCOLORLISTBOX => {
+            // ComboBox 的下拉列表与选中字段（dropdownlist 的静态区也走这条链路）
+            // 着色：底色与输入框一致，暗色下不露白
+            let hdc = wp as isize;
+            with_app(|app| unsafe {
+                let p = theme::palette(app.dark);
+                windows_sys::Win32::Graphics::Gdi::SetBkColor(hdc, p.surface2);
+                windows_sys::Win32::Graphics::Gdi::SetTextColor(hdc, p.text);
+                app.brushes.surface2
+            })
+        }
+        WM_MEASUREITEM => {
+            // owner-draw combo 的条目高度（combo 创建期间就会重入此消息，
+            // 不触碰 ST 状态）
+            let mi = lp as *mut MEASUREITEMSTRUCT;
+            if !mi.is_null() && (*mi).CtlType as u32 == ODT_COMBOBOX {
+                unsafe { (*mi).itemHeight = 24 };
+                return 1;
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
         WM_DRAWITEM => {
             let di = lp as *const DRAWITEMSTRUCT;
             if !di.is_null() {
+                if (*di).CtlType as u32 == ODT_COMBOBOX {
+                    with_st(|s| {
+                        let committed = if (*di).CtlID == CB_EFONT { s.sel_face } else { s.sel_size };
+                        with_app(|app| unsafe {
+                            draw_combo_item(di, app.dark, s.font, committed);
+                        });
+                    });
+                    return 1;
+                }
                 with_st(|s| {
                     let (text, kind, hov, down) = if (*di).CtlID == BTN_SAVE {
                         ("保存", BtnKind::Primary, s.hover_save, s.down_save)
@@ -589,6 +678,24 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 unsafe { SendMessageW(find_child(hwnd, RD_DARK), BM_CLICK, 0, 0) };
             } else if id == ST_RDS {
                 unsafe { SendMessageW(find_child(hwnd, RD_SYSTEM), BM_CLICK, 0, 0) };
+            } else if id == CB_EFONT || id == CB_ESIZE {
+                // 下拉列表通知：展开瞬间记录已提交选中行，供 owner-draw 画"当前值"深色。
+                // 原生高亮（ODS_SELECTED）会跟随鼠标/键盘移动，画成浅色；点击/Enter
+                // 提交后列表关闭，下次展开重新读回——所以只在 DROPDOWN 时读一次，
+                // 不能用 SELCHANGE（鼠标划过列表时它也会连续触发，会跟着鼠标变）
+                let code = ((wp >> 16) & 0xFFFF) as u16 as u32;
+                if code == CBN_DROPDOWN {
+                    with_st(|s| unsafe {
+                        let cb = find_child(s.hwnd, id);
+                        let sel = SendMessageW(cb, CB_GETCURSEL, 0, 0);
+                        let sel = if sel as i32 == CB_ERR { -1 } else { sel as i32 };
+                        if id == CB_EFONT {
+                            s.sel_face = sel;
+                        } else {
+                            s.sel_size = sel;
+                        }
+                    });
+                }
             }
             0
         }
@@ -645,6 +752,52 @@ fn send_checked(hwnd: HWND, on: bool) {
 
 fn is_checked(hwnd: HWND) -> bool {
     unsafe { SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED as isize }
+}
+
+/// owner-draw combo 条目/选字段两档高亮：已提交选中（当前值）accent_soft（深）、
+/// 原生高亮（ODS_SELECTED，跟随鼠标/键盘移动）accent_tint（浅）、普通 surface2。
+/// 深色优先于浅色（悬停停在被选中的行上时仍是深色）。DarkMode_Explorer 在
+/// Win10 上不会把 combo 选字段/列表底画成暗色，改由这里自绘。
+/// itemID = u32::MAX 是空选字段（只铺底）；ODS_COMBOBOXEDIT 标记的是编辑/字段区
+/// 绘制，不参与任何高亮
+unsafe fn draw_combo_item(di: *const DRAWITEMSTRUCT, dark: bool, font: isize, committed: i32) {
+    let p = theme::palette(dark);
+    let rc = (*di).rcItem;
+    let in_field = ((*di).itemState & ODS_COMBOBOXEDIT) != 0;
+    let highlight = !in_field && ((*di).itemState & ODS_SELECTED) != 0;
+    let committed_hit = !in_field && committed >= 0 && (*di).itemID as i32 == committed;
+    let bg = if committed_hit {
+        p.accent_soft
+    } else if highlight {
+        p.accent_tint
+    } else {
+        p.surface2
+    };
+    let b = CreateSolidBrush(bg);
+    FillRect((*di).hDC, &rc, b);
+    DeleteObject(b);
+    let id = (*di).itemID;
+    if id == u32::MAX {
+        return;
+    }
+    // CBS_HASSTRINGS：CB_GETLBTEXT 取回条目文本（返回字符数，出错为 -1）
+    let mut buf = [0u16; 64];
+    let n = SendMessageW((*di).hwndItem, CB_GETLBTEXT, id as usize, buf.as_mut_ptr() as isize);
+    if n <= 0 {
+        return;
+    }
+    SetBkMode((*di).hDC, TRANSPARENT as i32);
+    SetTextColor((*di).hDC, p.text);
+    SelectObject((*di).hDC, font);
+    let mut r = rc;
+    r.left += 6;
+    DrawTextW(
+        (*di).hDC,
+        buf.as_ptr(),
+        n as i32,
+        &mut r,
+        DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+    );
 }
 
 /// 设置对话框按钮的悬停/按下跟踪
@@ -724,6 +877,24 @@ unsafe extern "system" fn sbtn_proc(
     DefSubclassProc(hwnd, msg, wp, lp)
 }
 
+/// ComboBox 子类：把编辑子控件/下拉列表发到 combo 的 CTLCOLOR 消息转发给
+/// 对话框（combo 挂 DarkMode_Explorer 后不再自动转发，见安装处注释），
+/// 返回值照抄对话框给的画刷
+unsafe extern "system" fn combo_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    _id: usize,
+    _d: usize,
+) -> LRESULT {
+    if msg == WM_CTLCOLOREDIT || msg == WM_CTLCOLORLISTBOX {
+        let parent = windows_sys::Win32::UI::WindowsAndMessaging::GetParent(hwnd);
+        return SendMessageW(parent, msg, wp, lp);
+    }
+    DefSubclassProc(hwnd, msg, wp, lp)
+}
+
 unsafe extern "system" fn capture_proc(
     hwnd: HWND,
     msg: u32,
@@ -792,6 +963,105 @@ unsafe extern "system" fn capture_proc(
     DefSubclassProc(hwnd, msg, wp, lp)
 }
 
+// ---------- 编辑器字体下拉 ----------
+
+// 字号下拉的预设值（8~72 覆盖常用范围；不做可输入字号——CBS_DROPDOWN 的
+// 编辑子控件在 Win10 暗色 comctl 下自身底色画不黑，见 draw_combo_item 注释）
+const ED_SIZES: [i32; 23] = [
+    8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 22, 24, 26, 28, 32, 36, 40, 48, 56, 64, 72,
+];
+
+/// 枚举系统全部字体族名。DEFAULT_CHARSET 覆盖所有字符集；@ 开头的是东亚竖排
+/// 变体（横排文本用不上）；同名族按字符集重复出现，去重后大小写不敏感排序
+/// （CJK 名按码点自然排后）。回调只做字符串收集，无消息泵，裸指针传参安全
+fn enum_font_faces() -> Vec<String> {
+    unsafe extern "system" fn collect(
+        lf: *const LOGFONTW,
+        _tm: *const TEXTMETRICW,
+        _ty: u32,
+        lp: LPARAM,
+    ) -> i32 {
+        let out = unsafe { &mut *(lp as *mut Vec<String>) };
+        let face = util::from_wide(&unsafe { &*lf }.lfFaceName);
+        if !face.is_empty() && !face.starts_with('@') && !out.contains(&face) {
+            out.push(face);
+        }
+        1 // 非零 = 继续枚举
+    }
+    let mut faces: Vec<String> = Vec::new();
+    unsafe {
+        let hdc = GetDC(0);
+        if hdc != 0 {
+            let mut lf: LOGFONTW = std::mem::zeroed();
+            lf.lfCharSet = DEFAULT_CHARSET;
+            EnumFontFamiliesExW(hdc, &lf, Some(collect), &mut faces as *mut _ as LPARAM, 0);
+            ReleaseDC(0, hdc);
+        }
+    }
+    faces.sort_by_key(|f| f.to_lowercase());
+    faces
+}
+
+/// 列表里找字体名（大小写不敏感的精确匹配）
+fn face_index(faces: &[String], name: &str) -> Option<usize> {
+    if name.is_empty() {
+        return None;
+    }
+    faces.iter().position(|f| f.eq_ignore_ascii_case(name))
+}
+
+/// 填充字体下拉并预选当前值。配置名精确匹配不到时（字体有本地化别名，
+/// 枚举名与英文名不一致），以配置名建字体后 GetTextFace 取 GDI 解析出的
+/// 真实族名再匹配；仍找不到则不预选——应用保存时保留原配置不被静默改写
+unsafe fn fill_face_combo(cb: HWND, current: &str) {
+    let faces = enum_font_faces();
+    for f in &faces {
+        SendMessageW(cb, CB_ADDSTRING, 0, wide(f).as_ptr() as isize);
+    }
+    let mut pick = face_index(&faces, current);
+    if pick.is_none() {
+        let mem = CreateCompatibleDC(0);
+        if mem != 0 {
+            let hf = util::create_font_face_px(current, -12, 400, false);
+            if hf != 0 {
+                let old = SelectObject(mem, hf);
+                let mut buf = [0u16; 64];
+                let n = GetTextFaceW(mem, buf.len() as i32 - 1, buf.as_mut_ptr()).max(0) as usize;
+                SelectObject(mem, old);
+                DeleteObject(hf);
+                let resolved = util::from_wide(&buf[..n.min(buf.len())]);
+                pick = face_index(&faces, resolved.trim());
+            }
+            DeleteDC(mem);
+        }
+    }
+    if let Some(i) = pick {
+        SendMessageW(cb, CB_SETCURSEL, i as usize, 0);
+    }
+}
+
+/// 读回下拉当前项文本（无选中 = 保留原配置）。字体与字号共用：
+/// 两者都是 CBS_DROPDOWNLIST，条目即文本
+unsafe fn combo_selection(parent: HWND, id: u32) -> Option<String> {
+    let cb = find_child(parent, id);
+    let sel = SendMessageW(cb, CB_GETCURSEL, 0, 0);
+    if sel as i32 == CB_ERR {
+        return None;
+    }
+    let len = SendMessageW(cb, CB_GETLBTEXTLEN, sel as usize, 0) as usize;
+    if len == 0 || len > 512 {
+        return None;
+    }
+    let mut buf = vec![0u16; len + 1];
+    SendMessageW(cb, CB_GETLBTEXT, sel as usize, buf.as_mut_ptr() as isize);
+    let s = util::from_wide(&buf);
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
 fn apply(hwnd: HWND) {
     let (m, v) = with_st(|s| (s.hk_mods, s.hk_vk));
     let auto_hide = with_st(|s| is_checked(s.chk_autohide));
@@ -804,6 +1074,12 @@ fn apply(hwnd: HWND) {
         } else {
             "light"
         }
+    });
+    // 编辑器字体：下拉无选中 / 字号不在预设列表都保留原配置（字体被卸载等边界不静默改写）
+    let (ed_face, ed_size) = with_st(|s| unsafe {
+        let face = combo_selection(s.hwnd, CB_EFONT);
+        let size = combo_selection(s.hwnd, CB_ESIZE).and_then(|t| t.trim().parse::<i32>().ok());
+        (face, size)
     });
 
     if !hotkey::valid(m, v) {
@@ -838,7 +1114,14 @@ fn apply(hwnd: HWND) {
         app.cfg.auto_hide = auto_hide;
         app.cfg.autostart = autost;
         app.cfg.theme = theme_mode.to_string();
+        if let Some(f) = ed_face {
+            app.cfg.ed_font = f;
+        }
+        if let Some(n) = ed_size {
+            app.cfg.ed_size = n.clamp(8, 72);
+        }
         crate::config::save(&app.cfg);
+        crate::window::apply_editor_font(app);
         crate::window::apply_theme(app);
     });
     if !hk_ok {

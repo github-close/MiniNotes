@@ -45,7 +45,13 @@ pub fn create_ui_font(strike: bool) -> HFONT {
 
 /// 指定像素高度与字重创建界面字体（高度取负值 = 字符高度，不含行距）
 pub fn create_font_px(height: i32, weight: i32, strike: bool) -> HFONT {
-    let face = wide(UI_FONT_FACE);
+    create_font_face_px(UI_FONT_FACE, height, weight, strike)
+}
+
+/// 指定字体名 + 像素高度与字重创建字体（笔记编辑区独立字体设置用，
+/// 其余界面仍走 create_font_px 固定 YaHei UI）
+pub fn create_font_face_px(face: &str, height: i32, weight: i32, strike: bool) -> HFONT {
+    let face = wide(face);
     unsafe {
         CreateFontW(
             height,
