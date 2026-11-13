@@ -9,18 +9,18 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::UI::Controls::{
-    ImageList_Add, ImageList_Create, LVM_SETIMAGELIST,
+    ImageList_Add, ImageList_Create, LVM_SETIMAGELIST, LVM_GETTOOLTIPS,
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETTEXTCOLOR, LVM_SETTEXTBKCOLOR, ILC_COLOR32,
-    LVS_EX_FULLROWSELECT, LVS_NOCOLUMNHEADER, LVS_REPORT, LVS_SHOWSELALWAYS,
+    LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_NOCOLUMNHEADER, LVS_REPORT, LVS_SHOWSELALWAYS,
     LVIF_STATE, LVIS_SELECTED, LVSIL_SMALL, WM_MOUSELEAVE, DRAWITEMSTRUCT, NMHDR, ODS_SELECTED,
-    NMLISTVIEW, NMITEMACTIVATE, NMLVCUSTOMDRAW,
+    NMLISTVIEW, NMLVCUSTOMDRAW,
     LVM_GETITEMRECT, LVM_HITTEST, LVHITTESTINFO,
 };
+use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL,
-    VK_DELETE, VK_ESCAPE, VK_RETURN, VK_SPACE,
+    VK_DELETE, VK_ESCAPE, VK_RETURN,
 };
-use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow,
     DrawIconEx, EN_KILLFOCUS, EN_SETFOCUS, GetAncestor, GetClientRect,
@@ -79,7 +79,6 @@ const TAB_NOTE: usize = 1;
 const SUB_EDITOR: usize = 1;
 const SUB_TODO_INPUT: usize = 2;
 const SUB_NOTE_LIST: usize = 3;
-const SUB_TODO_LIST: usize = 4;
 const SUB_RENAME_EDIT: usize = 5;
 const SUB_BTN: usize = 10; // owner-draw 按钮的悬停跟踪子类
 
@@ -129,6 +128,9 @@ pub struct App {
     pub note_dirty: bool,
     pub suppress_notify: bool,
     pub todos: Vec<todos::TodoItem>,
+    pub todo_sel: Option<usize>, // 自绘待办列表的选中项
+    pub todo_scroll: i32,        // 自绘待办列表的滚动偏移
+    pub todo_line_h: i32,        // 待办 13px 字体的行高（换行测量/滚轮步进用）
     pub settings_open: bool,
     pub initialized: bool,
 
@@ -187,7 +189,7 @@ pub fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> R {
     }
 }
 
-fn app_ready() -> bool {
+pub fn app_ready() -> bool {
     unsafe { (*std::ptr::addr_of_mut!(APP)).is_some() }
 }
 
@@ -276,15 +278,13 @@ fn child(parent: HWND, class: &str, text: &str, style: u32, exstyle: u32, id: u3
     }
 }
 
-// 勾选框图标条：3 张 24x26 图（0=纯行背景，1=未完成圆环，2=完成对勾），
-// 像素由 assets/brand/make_todo_checkboxes.py 离线烘焙（4x 超采样抗锯齿，
-// 两套主题色各一份，theme.rs 改色后需重跑脚本）
+// 勾选框图标条 bin：3 格 24x26（像素透明底，仅尺寸参与 imagelist）。
+// 待办列表（todos.rs）按格 AlphaBlend 渲染图标本体；这里建 imagelist
+// 挂到笔记列表只为把行高撑到 26px——笔记行从不绘制图标，内容不参与渲染
 static TODO_ICONS_LIGHT: &[u8] = include_bytes!("../assets/brand/todo-icons-light.bin");
 static TODO_ICONS_DARK: &[u8] = include_bytes!("../assets/brand/todo-icons-dark.bin");
 
-/// 26px 高的透明小图列表：挂到列表上把行高撑起来，给自绘勾选框留空间。
-/// 这台 Win10 的 ImageList 不支持 alpha/mask 透明（全画成黑色不透明块），
-/// 因此图标自带行背景色底——与列表底色相同，视觉无缝；选中行的高亮从图标槽右侧开始
+/// 26px 高的小图列表：挂到笔记列表上把行高撑起来
 fn make_checkbox_imagelist(dark: bool) -> isize {
     let bin = if dark { TODO_ICONS_DARK } else { TODO_ICONS_LIGHT };
     unsafe {
@@ -353,6 +353,9 @@ pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
         note_dirty: false,
         suppress_notify: false,
         todos: todos_data,
+        todo_sel: None,
+        todo_scroll: 0,
+        todo_line_h: 0,
         settings_open: false,
         initialized: false,
         dark,
@@ -370,6 +373,7 @@ pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
     });
 
     unsafe {
+        todos::register_list_class();
         // 无边框平面输入框（边框由主窗口绘制）
         // 待办输入框：单行 EDIT，控件高度取字体行高、垂直嵌进 30px 槽内——
         // 单行控件的光标与文字同层、撑满控件高度，槽内居中后光标随文字居中
@@ -383,12 +387,12 @@ pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
             ID_TODO_INPUT,
         );
         let todo_add = child(hwnd, "BUTTON", "添加", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 0, ID_TODO_ADD);
+        // 自绘待办列表（超长条目换行显示，见 todos.rs 模块注释）
         let todo_list = child(
             hwnd,
-            "SysListView32",
+            todos::TODO_LIST_CLASS,
             "",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS
-                | LVS_NOCOLUMNHEADER,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
             0,
             ID_TODO_LIST,
         );
@@ -416,12 +420,11 @@ pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
         SendMessageW(editor, EM_SETLIMITTEXT, 0x7FFF_FFFE as usize, 0);
 
         // 勾选框图标随主题在 apply_theme 中重建并挂载
-        // 整行选择（不再用系统勾选框）
-        let ex = LVS_EX_FULLROWSELECT;
-        SendMessageW(todo_list, LVM_SETEXTENDEDLISTVIEWSTYLE, ex as usize, ex as LPARAM);
+        // 整行选择（不再用系统勾选框）；INFOTIP：截断的标题悬停浮出完整内容
+        // （自绘待办列表不适用，它靠换行显示全文）
+        let ex = LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP;
         SendMessageW(note_list, LVM_SETEXTENDEDLISTVIEWSTYLE, ex as usize, ex as LPARAM);
 
-        insert_column(todo_list, 2000);
         insert_column(note_list, 176);
 
         // 字体
@@ -443,7 +446,6 @@ pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
         SetWindowSubclass(editor, Some(child_subclass), SUB_EDITOR, 0);
         SetWindowSubclass(todo_input, Some(child_subclass), SUB_TODO_INPUT, 0);
         SetWindowSubclass(note_list, Some(child_subclass), SUB_NOTE_LIST, 0);
-        SetWindowSubclass(todo_list, Some(child_subclass), SUB_TODO_LIST, 0);
         for b in [todo_add, todo_clear, settings_btn, note_new] {
             SetWindowSubclass(b, Some(button_subclass), SUB_BTN, 0);
         }
@@ -469,6 +471,7 @@ pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
                 (note_new, false, false),
             ];
             app.input_line_h = input_line_h;
+            app.todo_line_h = util::font_line_height(font_todo);
         });
 
         with_app(todos::rebuild);
@@ -526,20 +529,30 @@ pub fn apply_theme(app: &mut App) {
         let old_himl = app.himl;
         let himl = make_checkbox_imagelist(dark);
         app.himl = himl;
-        SendMessageW(app.todo_list, LVM_SETIMAGELIST, LVSIL_SMALL as usize, himl);
+        // 自绘待办列表不用 imagelist（勾选框由 todos.rs 直接贴烘焙图标条），
+        // 它挂载在笔记列表上承担「撑行高到 26px」的结构职责
         SendMessageW(app.note_list, LVM_SETIMAGELIST, LVSIL_SMALL as usize, himl);
-        // 两个列表都换上新图列表后旧的就不再被引用，销毁掉，避免每次切主题漏一份
+        // 笔记列表换上新图列表后旧的就不再被引用，销毁掉，避免每次切主题漏一份
         if old_himl != 0 {
             windows_sys::Win32::UI::Controls::ImageList_Destroy(old_himl);
         }
-        for lv in [app.todo_list, app.note_list] {
-            // 不再发送 LVM_SETBKCOLOR：实测（Win10 19045 comctl32 6.10）发送过该消息后，
-            // 内联重命名 LVM_EDITLABELW 会在 comctl32 内部触发访问违例（进程闪退）。
-            // 列表背景由主题绘制与自绘覆盖，这条消息没有实际作用。
-            SendMessageW(lv, LVM_SETTEXTCOLOR, 0, theme::palette(dark).text as LPARAM);
-            SendMessageW(lv, LVM_SETTEXTBKCOLOR, 0, CLR_NONE as LPARAM);
+        // 笔记列表主题化（自绘待办列表的配色在 todos.rs 绘制时直接取色板）
+        // 不发送 LVM_SETBKCOLOR：实测（Win10 19045 comctl32 6.10）发送过该消息后，
+        // 内联重命名 LVM_EDITLABELW 会在 comctl32 内部触发访问违例（进程闪退）。
+        // 列表背景由主题绘制与自绘覆盖，这条消息没有实际作用。
+        SendMessageW(app.note_list, LVM_SETTEXTCOLOR, 0, theme::palette(dark).text as LPARAM);
+        SendMessageW(app.note_list, LVM_SETTEXTBKCOLOR, 0, CLR_NONE as LPARAM);
+        windows_sys::Win32::UI::Controls::SetWindowTheme(
+            app.note_list,
+            util::wide(theme_name).as_ptr(),
+            std::ptr::null(),
+        );
+        // 原生悬浮提示框是列表内部创建的 tooltip，单独挂一次主题——
+        // 否则暗色应用 + 亮色系统时提示框仍是白底（与 menu.rs 自绘菜单同一问题）
+        let tip = SendMessageW(app.note_list, LVM_GETTOOLTIPS, 0, 0);
+        if tip != 0 {
             windows_sys::Win32::UI::Controls::SetWindowTheme(
-                lv,
+                tip,
                 util::wide(theme_name).as_ptr(),
                 std::ptr::null(),
             );
@@ -597,7 +610,6 @@ fn layout(app: &mut App) {
         MoveWindow(app.todo_add, w - 104, py + 10, 92, 30, 1);
         MoveWindow(app.todo_list, 12, py + 50, w - 24, h - py - 50 - 46, 1);
         MoveWindow(app.todo_clear, w - 108, h - 38, 96, 28, 1);
-        SendMessageW(app.todo_list, windows_sys::Win32::UI::Controls::LVM_SETCOLUMNWIDTH, 0, (w - 44).max(60) as LPARAM);
 
         // 笔记页
         ShowWindow(app.note_new, if todo { SW_HIDE } else { SW_SHOW });
@@ -1162,6 +1174,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 app.font_todo_strike = 0;
             });
             notes::cleanup_pin_assets();
+            todos::cleanup_assets();
             tray::remove(hwnd);
             unsafe {
                 let p = std::ptr::addr_of_mut!(GDIP);
@@ -1259,30 +1272,12 @@ fn on_command(wp: WPARAM) -> LRESULT {
 
 fn on_notify(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     use windows_sys::Win32::UI::Controls::{
-        LVN_ITEMCHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_RCLICK,
+        LVN_ITEMCHANGED, NM_CUSTOMDRAW, NM_DBLCLK, NM_RCLICK,
     };
     let hdr = lp as *const NMHDR;
     unsafe {
         let (id_from, code) = ((*hdr).idFrom, (*hdr).code);
         match id_from as u32 {
-            ID_TODO_LIST => match code {
-                NM_CUSTOMDRAW => with_app(|app| todos::on_custom_draw(app, &*(lp as *const NMLVCUSTOMDRAW))),
-                NM_CLICK => {
-                    with_app(|app| {
-                        todos::on_click(app, &*(lp as *const NMITEMACTIVATE));
-                    });
-                    0
-                }
-                NM_DBLCLK => {
-                    with_app(todos::begin_edit);
-                    0
-                }
-                NM_RCLICK => {
-                    todo_ctx_menu(hwnd);
-                    0
-                }
-                _ => DefWindowProcW(hwnd, WM_NOTIFY, wp, lp),
-            },
             ID_NOTE_LIST => match code {
                 NM_CUSTOMDRAW => with_app(|app| notes::on_custom_draw(app, &*(lp as *const NMLVCUSTOMDRAW))),
                 LVN_ITEMCHANGED => {
@@ -1400,7 +1395,7 @@ fn note_ctx_menu(hwnd: HWND) {
     }
 }
 
-fn todo_ctx_menu(hwnd: HWND) {
+pub(crate) fn todo_ctx_menu(hwnd: HWND) {
     match popup_at(
         hwnd,
         &[
@@ -1574,11 +1569,12 @@ unsafe extern "system" fn child_subclass(
         }
         return DefSubclassProc(hwnd, msg, wp, lp);
     }
-    // 列表的两个暗色补丁（内联重命名编辑框挂在列表下，消息由列表收到）：
+    // 笔记列表的暗色补丁（内联重命名编辑框挂在列表下，消息由列表收到）：
     // WM_ERASEBKGND：擦除用窗口底色，避免主题底色与自绘底色在滚动时闪色差
     // WM_CTLCOLOREDIT：重命名编辑框默认白底黑字（DefWindowProc 兜底），
     //   在这里主题化成与待办输入框一致的 surface2 底
-    if id == SUB_NOTE_LIST || id == SUB_TODO_LIST {
+    // （自绘待办列表的同款处理在其自身 wndproc 里，见 todos.rs）
+    if id == SUB_NOTE_LIST {
         match msg {
             WM_ERASEBKGND => {
                 with_app(|app| unsafe {
@@ -1680,7 +1676,7 @@ unsafe extern "system" fn child_subclass(
                                 if new_line.unwrap_or(-1) != d.line {
                                     let mut crc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
                                     unsafe { GetClientRect(hwnd, &mut crc) };
-                                    let mut strip = |y: i32| unsafe {
+                                    let strip = |y: i32| unsafe {
                                         InvalidateRect(
                                             hwnd,
                                             &RECT { left: 0, top: y - 2, right: crc.right, bottom: y + 2 },
@@ -1786,20 +1782,6 @@ unsafe extern "system" fn child_subclass(
                 }
                 if vk == VK_DELETE as u32 {
                     PostMessageW(root, MSG_DEL_NOTE, 0, 0);
-                    return 1;
-                }
-            }
-            SUB_TODO_LIST => {
-                if vk == VK_ESCAPE as u32 {
-                    PostMessageW(root, MSG_ESC_HIDE, 0, 0);
-                    return 1;
-                }
-                if vk == VK_DELETE as u32 {
-                    PostMessageW(root, MSG_DEL_TODO, 0, 0);
-                    return 1;
-                }
-                if vk == VK_SPACE as u32 {
-                    PostMessageW(root, MSG_TOGGLE_TODO, 0, 0);
                     return 1;
                 }
             }

@@ -54,13 +54,13 @@ impl Target {
         }
     }
 
-    /// 编辑框 x（listview 客户区坐标）。编辑框文字自带 ~2px 边距，
+    /// 编辑框 x（列表客户区坐标）。编辑框文字自带 ~2px 边距，
     /// 减 2 后其文字与自绘标题文字同列：
-    /// 笔记标题在 x=12（行首无图标），待办标题在图标槽后 x=54。
+    /// 笔记标题在 x=10+2=12（行首无图标），待办标题在勾选框后 x=28+2=30。
     fn edit_x(self) -> i32 {
         match self {
             Target::Note(_) => 10,
-            Target::Todo(_) => 52,
+            Target::Todo(_) => 28,
         }
     }
 }
@@ -75,15 +75,23 @@ fn item_rect(lv: HWND, idx: usize) -> RECT {
 pub fn start(app: &mut App, target: Target, text: &str) {
     cancel(app);
     let lv = target.lv(app);
-    let idx = match target {
-        Target::Note(i) => i,
-        Target::Todo(i) => i,
+    // 条目矩形与宽度按列表分支：笔记仍走 ListView 消息，
+    // 待办是自绘列表（换行条目高度可变），几何由 todos::item_rect 计算
+    let rc = match target {
+        Target::Note(i) => item_rect(lv, i),
+        Target::Todo(i) => crate::todos::item_rect(app, i),
     };
-    let rc = item_rect(lv, idx);
     if rc.bottom <= rc.top {
         return;
     }
-    let colw = unsafe { SendMessageW(lv, LVM_GETCOLUMNWIDTH, 0, 0) as i32 };
+    let colw = match target {
+        Target::Note(_) => unsafe { SendMessageW(lv, LVM_GETCOLUMNWIDTH, 0, 0) as i32 },
+        Target::Todo(_) => {
+            let mut crc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            unsafe { GetClientRect(lv, &mut crc) };
+            crc.right
+        }
+    };
     let x = target.edit_x();
     let edit = unsafe {
         CreateWindowExW(
