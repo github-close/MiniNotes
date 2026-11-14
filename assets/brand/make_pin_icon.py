@@ -1,18 +1,19 @@
-"""生成笔记列表行尾「置顶图钉」像素资源 (pin-light.bin / pin-dark.bin)。
+"""生成笔记列表行尾「置顶图钉」像素资源 (pin-light.bin / pin-dark.bin / pin-yellow.bin)。
 
 图标来源：Windows 系统自带图标字体 Segoe MDL2 Assets 的 Pin 字形 (U+E718)，
 逆时针旋转 90° 使针尖朝下（系统字形横向朝左），不用手绘矢量。
-颜色烘焙两份，分别对应 theme.rs 两套色板的 accent 常量：
-  LIGHT.accent = rgb(0x34, 0x78, 0xF6)
-  DARK.accent  = rgb(0x6B, 0x9F, 0xFF)
+颜色烘焙三份，分别对应 theme.rs 三套色板的 accent 常量：
+  LIGHT.accent  = rgb(0x34, 0x78, 0xF6)
+  DARK.accent   = rgb(0x6B, 0x9F, 0xFF)
+  YELLOW.accent = rgb(0xE0, 0x9A, 0x00)
 （theme.rs 改色时需重跑本脚本）
 
 用法：python make_pin_icon.py
 输出：
-  pin-light.bin / pin-dark.bin — 12×16，逐行自底向上，每像素 4 字节预乘 BGRA，
-  源码 notes.rs 的 PIN_LIGHT_BIN / PIN_DARK_BIN 直接 include_bytes 使用，
+  pin-light.bin / pin-dark.bin / pin-yellow.bin — 12×16，逐行自底向上，
+  每像素 4 字节预乘 BGRA，源码 notes.rs 的 PIN_*_BIN 直接 include_bytes 使用，
   运行时 CreateDIBSection + AlphaBlend(AC_SRC_OVER) 合成，无解码器。
-  pin-preview.png — 实际 1x 效果预览（浅色/暗色两栏 + 放大图）。
+  pin-preview-*.png — 实际 1x 效果预览（放大图）。
 """
 import struct
 from PIL import Image, ImageFont, ImageDraw
@@ -21,6 +22,7 @@ BOX_W, BOX_H = 12, 16          # 位图尺寸（含 1px 边距）
 GLYPH_H = 14                   # 字形目标高度（宽度按比例）
 LIGHT_BG, LIGHT_ACCENT = (255, 255, 255), (0x34, 0x78, 0xF6)
 DARK_BG, DARK_ACCENT = (0x1E, 0x1F, 0x23), (0x6B, 0x9F, 0xFF)
+YELLOW_BG, YELLOW_ACCENT = (0xFF, 0xF6, 0xD8), (0xE0, 0x9A, 0x00)
 
 def glyph_alpha() -> Image.Image:
     """E718 字形的灰度 alpha 遮罩：高分辨率渲染 → 旋转 → 裁切 → 缩到目标高"""
@@ -66,7 +68,8 @@ def compose(preview_path_alpha: Image.Image, accent, bg, path: str, zoom_img=Non
 alpha = glyph_alpha()
 light = bake(alpha, LIGHT_ACCENT)
 dark = bake(alpha, DARK_ACCENT)
-for name, data in (("pin-light.bin", light), ("pin-dark.bin", dark)):
+yellow = bake(alpha, YELLOW_ACCENT)
+for name, data in (("pin-light.bin", light), ("pin-dark.bin", dark), ("pin-yellow.bin", yellow)):
     with open(name, "wb") as f:
         f.write(data)
     print(f"wrote {name}: {BOX_W}x{BOX_H} premultiplied BGRA bottom-up, {len(data)} bytes")
@@ -82,13 +85,14 @@ def debin(data: bytes) -> Image.Image:
             px[x, y] = (r, g, b, a)
     return img
 
-la, da = debin(light), debin(dark)
+la, da, ya = debin(light), debin(dark), debin(yellow)
 strip = Image.new("RGB", (BOX_W * 4, BOX_H), LIGHT_BG)
 strip.paste(la, (BOX_W, 0), la)
 strip.save("pin-preview-1x.png")
 zoom_w, zoom_h = BOX_W * 10, BOX_H * 10
-zoom = Image.new("RGB", (zoom_w * 2 + 40, zoom_h), (24, 24, 24))
+zoom = Image.new("RGB", (zoom_w * 3 + 80, zoom_h), (24, 24, 24))
 zoom.paste(la.resize((zoom_w, zoom_h), Image.NEAREST), (0, 0), la.resize((zoom_w, zoom_h), Image.NEAREST))
 zoom.paste(da.resize((zoom_w, zoom_h), Image.NEAREST), (zoom_w + 40, 0), da.resize((zoom_w, zoom_h), Image.NEAREST))
+zoom.paste(ya.resize((zoom_w, zoom_h), Image.NEAREST), (zoom_w * 2 + 80, 0), ya.resize((zoom_w, zoom_h), Image.NEAREST))
 zoom.save("pin-preview-zoom.png")
 print("wrote pin-preview-1x.png / pin-preview-zoom.png")

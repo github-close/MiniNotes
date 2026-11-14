@@ -120,7 +120,7 @@ pub fn start(app: &mut App, target: Target, text: &str) {
     apply_font(edit, font);
     // 挂系统主题类：暗色下光标用浅色（默认 EDIT 光标近黑，深底上不可见）；
     // 背景文字配色由列表子类的 WM_CTLCOLOREDIT 接管（见 window.rs child_subclass）
-    let theme_name = if app.dark { "DarkMode_Explorer" } else { "Explorer" };
+    let theme_name = if app.theme.is_dark() { "DarkMode_Explorer" } else { "Explorer" };
     unsafe {
         windows_sys::Win32::UI::Controls::SetWindowTheme(
             edit,

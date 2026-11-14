@@ -71,6 +71,9 @@ const ST_RDS: u32 = 17;
 const ST_EFONT: u32 = 18; // 「编辑器字体：」标签
 const CB_EFONT: u32 = 19; // 字体族下拉
 const CB_ESIZE: u32 = 20; // 字号下拉（可输入）
+// 第四档主题（浅黄）：单选钮 + 其 STATIC 文字标签
+const RD_YELLOW: u32 = 21;
+const ST_RDY: u32 = 22;
 const SUB_CAPTURE: usize = 10;
 const SUB_SBTN: usize = 11;
 const SUB_COMBO: usize = 12;
@@ -252,7 +255,8 @@ pub fn open(owner: HWND) {
         RegisterClassW(&wc);
 
         let style = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU) as u32;
-        let mut rc = RECT { left: 0, top: 0, right: 360, bottom: 258 + BANNER_SHIFT };
+        // 宽 384：主题行要放下四个单选钮（浅色/暗色/浅黄/跟随系统）
+        let mut rc = RECT { left: 0, top: 0, right: 384, bottom: 258 + BANNER_SHIFT };
         AdjustWindowRect(&mut rc, style, 0);
         let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
 
@@ -309,7 +313,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
         WM_CREATE => {
             let cs = lp as *const windows_sys::Win32::UI::WindowsAndMessaging::CREATESTRUCTW;
             let owner = (*cs).hwndParent;
-            let dark = with_app(|app| app.dark);
+            let dark = with_app(|app| app.theme.is_dark());
             let (m, v, auto_hide, theme_mode) = with_app(|app| {
                 (app.cfg.hotkey_mods, app.cfg.hotkey_vk, app.cfg.auto_hide, app.cfg.theme.clone())
             });
@@ -406,7 +410,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 "STATIC",
                 "点击热键输入框后按下组合键即可录入（如 Alt+N）。\n热键需包含 Ctrl / Alt / Shift / Win 至少一个修饰键。",
                 WS_CHILD | WS_VISIBLE,
-                14, 42 + BANNER_SHIFT, 336, 36,
+                14, 42 + BANNER_SHIFT, 360, 36,
                 ST_HINT,
             );
             let st_theme = mk("STATIC", "主题：", WS_CHILD | WS_VISIBLE, 14, 88 + BANNER_SHIFT, 62, 18, ST_LABEL + 100);
@@ -415,10 +419,12 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             // SS_NOTIFY 让点击文字也能切换对应单选钮
             let rd_light = mk("BUTTON", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32 | WS_GROUP as u32, 80, 86 + BANNER_SHIFT, 18, 18, RD_LIGHT);
             let rd_dark = mk("BUTTON", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 148, 86 + BANNER_SHIFT, 18, 18, RD_DARK);
-            let rd_system = mk("BUTTON", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 216, 86 + BANNER_SHIFT, 18, 18, RD_SYSTEM);
+            let rd_yellow = mk("BUTTON", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 216, 86 + BANNER_SHIFT, 18, 18, RD_YELLOW);
+            let rd_system = mk("BUTTON", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON as u32, 284, 86 + BANNER_SHIFT, 18, 18, RD_SYSTEM);
             let st_rdl = mk("STATIC", "浅色", WS_CHILD | WS_VISIBLE | SS_NOTIFY, 102, 87 + BANNER_SHIFT, 40, 18, ST_RDL);
             let st_rdd = mk("STATIC", "暗色", WS_CHILD | WS_VISIBLE | SS_NOTIFY, 170, 87 + BANNER_SHIFT, 40, 18, ST_RDD);
-            let st_rds = mk("STATIC", "跟随系统", WS_CHILD | WS_VISIBLE | SS_NOTIFY, 238, 87 + BANNER_SHIFT, 84, 18, ST_RDS);
+            let st_rdy = mk("STATIC", "浅黄", WS_CHILD | WS_VISIBLE | SS_NOTIFY, 238, 87 + BANNER_SHIFT, 40, 18, ST_RDY);
+            let st_rds = mk("STATIC", "跟随系统", WS_CHILD | WS_VISIBLE | SS_NOTIFY, 306, 87 + BANNER_SHIFT, 62, 18, ST_RDS);
             // checkbox 文字由 STATIC 承担：DarkMode_Explorer 主题下系统自绘的
             // checkbox 文字颜色不受 WM_CTLCOLORSTATIC 控制，会隐入深色背景
             let chk_hide = mk(
@@ -458,7 +464,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 "",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST as u32 | WS_VSCROLL as u32
                     | CBS_OWNERDRAWFIXED as u32 | CBS_HASSTRINGS as u32,
-                94, 174 + BANNER_SHIFT, 180, 240,
+                94, 174 + BANNER_SHIFT, 204, 240,
                 CB_EFONT,
             );
             let cb_size = mk(
@@ -466,22 +472,22 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 "",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST as u32 | WS_VSCROLL as u32
                     | CBS_OWNERDRAWFIXED as u32 | CBS_HASSTRINGS as u32,
-                280, 174 + BANNER_SHIFT, 62, 240,
+                304, 174 + BANNER_SHIFT, 62, 240,
                 CB_ESIZE,
             );
-            let btn_save = mk("BUTTON", "保存", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 180, 214 + BANNER_SHIFT, 80, 30, BTN_SAVE);
-            let btn_cancel = mk("BUTTON", "取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 268, 214 + BANNER_SHIFT, 80, 30, BTN_CANCEL);
+            let btn_save = mk("BUTTON", "保存", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 204, 214 + BANNER_SHIFT, 80, 30, BTN_SAVE);
+            let btn_cancel = mk("BUTTON", "取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32, 292, 214 + BANNER_SHIFT, 80, 30, BTN_CANCEL);
 
             util::apply_font(st_title, font_title);
             util::apply_font(st_tag, font);
-            for h in [st_label, ed, st_theme, rd_light, st_rdl, rd_dark, st_rdd, rd_system, st_rds, chk_hide, st_hide, chk_auto, st_auto, st_hint, btn_save, btn_cancel, st_edfont, cb_face, cb_size] {
+            for h in [st_label, ed, st_theme, rd_light, st_rdl, rd_dark, st_rdd, rd_yellow, st_rdy, rd_system, st_rds, chk_hide, st_hide, chk_auto, st_auto, st_hint, btn_save, btn_cancel, st_edfont, cb_face, cb_size] {
                 util::apply_font(h, font);
             }
 
             // 复选框/单选钮的图形与热键输入框的光标在暗色下用系统暗色主题绘制（文字由 STATIC 承担）；
             // ComboBox 挂同款主题，下拉滚动条/箭头跟随暗色（列表配色见 WM_CTLCOLORLISTBOX）
             let theme_name = if dark { "DarkMode_Explorer" } else { "Explorer" };
-            for h in [rd_light, rd_dark, rd_system, chk_hide, chk_auto, ed, cb_face, cb_size] {
+            for h in [rd_light, rd_dark, rd_yellow, rd_system, chk_hide, chk_auto, ed, cb_face, cb_size] {
                 SetWindowTheme(h, wide(theme_name).as_ptr(), std::ptr::null());
             }
 
@@ -514,6 +520,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             }
             send_checked(rd_light, theme_mode == "light");
             send_checked(rd_dark, theme_mode == "dark");
+            send_checked(rd_yellow, theme_mode == "yellow");
             send_checked(rd_system, theme_mode == "system");
             send_checked(chk_hide, auto_hide);
             send_checked(chk_auto, autost);
@@ -553,7 +560,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             with_app(|app| unsafe {
                 let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
                 windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rc);
-                let b = CreateSolidBrush(theme::palette(app.dark).window_bg);
+                let b = CreateSolidBrush(theme::palette(app.theme).window_bg);
                 FillRect(wp as isize, &rc, b);
                 DeleteObject(b);
             });
@@ -583,7 +590,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
         WM_CTLCOLORSTATIC => {
             let hdc = wp as isize;
             with_app(|app| unsafe {
-                let p = theme::palette(app.dark);
+                let p = theme::palette(app.theme);
                 let ctl = lp as HWND;
                 let id = windows_sys::Win32::UI::WindowsAndMessaging::GetDlgCtrlID(ctl);
                 // 提示语与 banner 标语用次级文字色
@@ -596,7 +603,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
         WM_CTLCOLOREDIT => {
             let hdc = wp as isize;
             with_app(|app| unsafe {
-                let p = theme::palette(app.dark);
+                let p = theme::palette(app.theme);
                 windows_sys::Win32::Graphics::Gdi::SetBkColor(hdc, p.surface2);
                 windows_sys::Win32::Graphics::Gdi::SetTextColor(hdc, p.text);
                 app.brushes.surface2
@@ -607,7 +614,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             // 着色：底色与输入框一致，暗色下不露白
             let hdc = wp as isize;
             with_app(|app| unsafe {
-                let p = theme::palette(app.dark);
+                let p = theme::palette(app.theme);
                 windows_sys::Win32::Graphics::Gdi::SetBkColor(hdc, p.surface2);
                 windows_sys::Win32::Graphics::Gdi::SetTextColor(hdc, p.text);
                 app.brushes.surface2
@@ -630,7 +637,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                     with_st(|s| {
                         let committed = if (*di).CtlID == CB_EFONT { s.sel_face } else { s.sel_size };
                         with_app(|app| unsafe {
-                            draw_combo_item(di, app.dark, s.font, committed);
+                            draw_combo_item(di, app.theme, s.font, committed);
                         });
                     });
                     return 1;
@@ -649,7 +656,7 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                             kind,
                             hov,
                             down || ((*di).itemState & ODS_SELECTED != 0),
-                            app.dark,
+                            app.theme,
                             s.font,
                             BtnAlign::Center,
                         );
@@ -678,6 +685,8 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 unsafe { SendMessageW(find_child(hwnd, RD_DARK), BM_CLICK, 0, 0) };
             } else if id == ST_RDS {
                 unsafe { SendMessageW(find_child(hwnd, RD_SYSTEM), BM_CLICK, 0, 0) };
+            } else if id == ST_RDY {
+                unsafe { SendMessageW(find_child(hwnd, RD_YELLOW), BM_CLICK, 0, 0) };
             } else if id == CB_EFONT || id == CB_ESIZE {
                 // 下拉列表通知：展开瞬间记录已提交选中行，供 owner-draw 画"当前值"深色。
                 // 原生高亮（ODS_SELECTED）会跟随鼠标/键盘移动，画成浅色；点击/Enter
@@ -760,8 +769,8 @@ fn is_checked(hwnd: HWND) -> bool {
 /// Win10 上不会把 combo 选字段/列表底画成暗色，改由这里自绘。
 /// itemID = u32::MAX 是空选字段（只铺底）；ODS_COMBOBOXEDIT 标记的是编辑/字段区
 /// 绘制，不参与任何高亮
-unsafe fn draw_combo_item(di: *const DRAWITEMSTRUCT, dark: bool, font: isize, committed: i32) {
-    let p = theme::palette(dark);
+unsafe fn draw_combo_item(di: *const DRAWITEMSTRUCT, t: theme::Theme, font: isize, committed: i32) {
+    let p = theme::palette(t);
     let rc = (*di).rcItem;
     let in_field = ((*di).itemState & ODS_COMBOBOXEDIT) != 0;
     let highlight = !in_field && ((*di).itemState & ODS_SELECTED) != 0;
@@ -1069,6 +1078,8 @@ fn apply(hwnd: HWND) {
     let theme_mode = with_st(|s| {
         if is_checked(find_child(s.hwnd, RD_DARK)) {
             "dark"
+        } else if is_checked(find_child(s.hwnd, RD_YELLOW)) {
+            "yellow"
         } else if is_checked(find_child(s.hwnd, RD_SYSTEM)) {
             "system"
         } else {

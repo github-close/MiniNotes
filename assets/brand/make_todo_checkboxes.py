@@ -1,13 +1,14 @@
-"""生成待办列表勾选框图标资源 (todo-icons-light.bin / todo-icons-dark.bin)。
+"""生成待办列表勾选框图标资源 (todo-icons-light.bin / todo-icons-dark.bin / todo-icons-yellow.bin)。
 
 图标在 4 倍超采样画布上以几何原语绘制（正圆 + 折线），LANCZOS 降采样得到
 平滑抗锯齿边缘，替代旧的逐像素距离数学烘焙（无抗锯齿、边缘毛糙）。
 底色为全透明（预乘 alpha=0）：消费方 todos.rs 用 AlphaBlend(AC_SRC_ALPHA)
 按格贴图，选中行的胶囊底色可以从图标四周透出来；笔记列表同 bin 只用于
 imagelist 撑行高、内容从不渲染，透明与否无影响。
-颜色取自 theme.rs 两套色板常量（改色后需重跑本脚本）：
-  LIGHT: text_disabled=A3AAB3 accent=3478F6 on_accent=FFFFFF
-  DARK : text_disabled=60656B accent=6B9FFF on_accent=10141A
+颜色取自 theme.rs 三套色板常量（改色后需重跑本脚本）：
+  LIGHT : text_disabled=A3AAB3 accent=3478F6 on_accent=FFFFFF
+  DARK  : text_disabled=60656B accent=6B9FFF on_accent=10141A
+  YELLOW: text_disabled=B5A682 accent=E09A00 on_accent=2E2614
 
 输出格式（window.rs make_checkbox_imagelist / todos.rs 直接 include_bytes）：
   72×26 图标条（3 格横排：0=全透明占位，1=未完成圆环，2=完成对勾），
@@ -32,6 +33,12 @@ PALETTES = {
         "ring": (0x60, 0x65, 0x6B),
         "fill": (0x6B, 0x9F, 0xFF),
         "check": (0x10, 0x14, 0x1A),
+    },
+    "yellow": {
+        "bg": (0xFF, 0xF6, 0xD8),
+        "ring": (0xB5, 0xA6, 0x82),   # text_disabled
+        "fill": (0xE0, 0x9A, 0x00),   # accent
+        "check": (0x2E, 0x26, 0x14),  # on_accent
     },
 }
 
@@ -85,7 +92,11 @@ def bake_strip(s: dict) -> bytes:
     return b"".join(rows)
 
 
-BG_OF = {"light": (0xFF, 0xFF, 0xFF), "dark": (0x1E, 0x1F, 0x23)}  # 预览底=window_bg
+BG_OF = {
+    "light": (0xFF, 0xFF, 0xFF),
+    "dark": (0x1E, 0x1F, 0x23),
+    "yellow": (0xFF, 0xF6, 0xD8),
+}  # 预览底=window_bg
 
 for name, s in PALETTES.items():
     data = bake_strip(s)
@@ -107,9 +118,9 @@ def load_strip(path: str) -> Image.Image:
             px[x, y] = (r, g, b, a)
     return img
 
-prev = Image.new("RGB", (CELL_W * 6 + 6, CELL_H), (90, 90, 90))
+prev = Image.new("RGB", (CELL_W * 9 + 12, CELL_H), (90, 90, 90))
 strips = {}
-for i, name in enumerate(("light", "dark")):
+for i, name in enumerate(("light", "dark", "yellow")):
     strip = load_strip(f"todo-icons-{name}.bin")
     strips[name] = strip
     bg = Image.new("RGB", (CELL_W * 3, CELL_H), BG_OF[name])
@@ -118,12 +129,13 @@ for i, name in enumerate(("light", "dark")):
 prev.save("todo-preview-1x.png")
 
 Z = 8
-zoom = Image.new("RGB", ((CELL_W * 3) * Z * 2 + 24, CELL_H * Z), (24, 24, 24))
-for i, name in enumerate(("light", "dark")):
+zoom = Image.new("RGB", ((CELL_W * 3) * Z * 3 + 48, CELL_H * Z), (24, 24, 24))
+for i, name in enumerate(("light", "dark", "yellow")):
     strip = strips[name]
     big = strip.resize((CELL_W * 3 * Z, CELL_H * Z), Image.NEAREST)
     bg = Image.new("RGB", (CELL_W * 3 * Z, CELL_H * Z), BG_OF[name])
     bg.paste(big, (0, 0), big)
     zoom.paste(bg, (i * ((CELL_W * 3) * Z + 24), 0))
+
 zoom.save("todo-preview-zoom.png")
 print("wrote todo-preview-1x.png / todo-preview-zoom.png")

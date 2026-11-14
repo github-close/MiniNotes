@@ -182,7 +182,9 @@ pub fn reorder(app: &mut App, from: usize, to: usize) {
     } else {
         to.clamp(boundary, app.notes.len())
     };
-    if to == from || to == from + 1 {
+    // to 是 remove 后的插入索引：to == from 才是原位；to == from + 1 是
+    // 真实的"向下移一格"（删掉自己后补插一格），不能当 no-op 吞掉
+    if to == from {
         return;
     }
     // 移动前先记下当前笔记名：remove/insert 会平移索引，按名字重定位
@@ -268,7 +270,10 @@ pub fn drag_line_y(pin_boundary: usize, lv: HWND, from: i32, x: i32, y: i32) -> 
     } else {
         to.clamp(pb, i32::MAX)
     };
-    if to == from || to == from + 1 {
+    // to 是 remove 后的插入索引：to == from 才是原位放置（自己行的下半/
+    // 下一行上半经校正后都折叠回 to == from）；to == from + 1 是真实的
+    // 向下移一格，要有线
+    if to == from {
         return None;
     }
     if to == raw {
@@ -300,7 +305,7 @@ pub fn on_custom_draw(app: &crate::window::App, nm: &NMLVCUSTOMDRAW) -> LRESULT 
                 }
             }
             CDDS_POSTPAINT => {
-                let p = theme::palette(app.dark);
+                let p = theme::palette(app.theme);
                 let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
                 windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(lv, &mut rc);
                 // Explorer 主题会在最右列边缘画一条贯穿整个列表的 1px 装饰竖线，
@@ -338,7 +343,7 @@ pub fn on_custom_draw(app: &crate::window::App, nm: &NMLVCUSTOMDRAW) -> LRESULT 
             CDDS_ITEMPREPAINT => {
                 let idx = nm.nmcd.dwItemSpec as usize;
                 let i = nm.nmcd.dwItemSpec as i32;
-                let p = theme::palette(app.dark);
+                let p = theme::palette(app.theme);
                 let rc = lv_item_rect(lv, i);
                 // 行底铺窗口底色：主题控件在 ITEM_PREPAINT 前画的主题行底与窗口底
                 // 存在色差（暗色下成"凸面板"），行内自填即可，且局部重绘自洽
@@ -385,7 +390,7 @@ pub fn on_custom_draw(app: &crate::window::App, nm: &NMLVCUSTOMDRAW) -> LRESULT 
                     DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
                 );
                 if pinned {
-                    draw_pin(nm.nmcd.hdc, rc.right - 17, (rc.top + rc.bottom) / 2, app.dark);
+                    draw_pin(nm.nmcd.hdc, rc.right - 17, (rc.top + rc.bottom) / 2, app.theme);
                 }
                 CDRF_SKIPDEFAULT as LRESULT
             }
@@ -397,25 +402,26 @@ pub fn on_custom_draw(app: &crate::window::App, nm: &NMLVCUSTOMDRAW) -> LRESULT 
 // ---------- 行尾置顶图钉 ----------
 
 /// 置顶图钉 = 系统图标字体 Segoe MDL2 Assets 的 Pin 字形（U+E718，旋转为针尖
-/// 朝下）烘焙成的像素资源，由 assets/brand/make_pin_icon.py 生成（浅色/暗色
-/// 两套强调色各一份，theme.rs 改色后需重跑脚本）。运行时 CreateDIBSection +
+/// 朝下）烘焙成的像素资源，由 assets/brand/make_pin_icon.py 生成（三主题
+/// 强调色各一份，theme.rs 改色后需重跑脚本）。运行时 CreateDIBSection +
 /// AlphaBlend 直接合成——不用运行时画矢量，视觉与设计稿逐像素一致
 static PIN_LIGHT_BIN: &[u8] = include_bytes!("../assets/brand/pin-light.bin");
 static PIN_DARK_BIN: &[u8] = include_bytes!("../assets/brand/pin-dark.bin");
+static PIN_YELLOW_BIN: &[u8] = include_bytes!("../assets/brand/pin-yellow.bin");
 
 const PIN_W: i32 = 12;
 const PIN_H: i32 = 16;
 
-// 两个主题的图钉位图（memory DC + DIB），首次使用时按需创建。
-// 索引 0 = 浅色主题 1 = 暗色主题；进程退出统一在 cleanup_pin_assets 释放
-static mut PIN_DC: [isize; 2] = [0; 2];
-static mut PIN_BMP: [isize; 2] = [0; 2];
+// 三个主题的图钉位图（memory DC + DIB），首次使用时按需创建。
+// 索引 0 = 浅色 1 = 暗色 2 = 浅黄；进程退出统一在 cleanup_pin_assets 释放
+static mut PIN_DC: [isize; 3] = [0; 3];
+static mut PIN_BMP: [isize; 3] = [0; 3];
 
 /// WM_DESTROY 时释放图钉位图资源
 pub fn cleanup_pin_assets() {
     unsafe {
         let (dc, bmp) = (std::ptr::addr_of_mut!(PIN_DC), std::ptr::addr_of_mut!(PIN_BMP));
-        for i in 0..2 {
+        for i in 0..3 {
             if (*dc)[i] != 0 {
                 DeleteDC((*dc)[i]);
                 (*dc)[i] = 0;
@@ -430,7 +436,11 @@ pub fn cleanup_pin_assets() {
 
 /// 惰性创建 idx 主题的图钉位图（memory DC，选入预乘 BGRA 的 DIB）
 unsafe fn pin_dc(hdc: isize, idx: usize) -> isize {
-    let bin = if idx == 0 { PIN_LIGHT_BIN } else { PIN_DARK_BIN };
+    let bin = match idx {
+        1 => PIN_DARK_BIN,
+        2 => PIN_YELLOW_BIN,
+        _ => PIN_LIGHT_BIN,
+    };
     let (dc, bmp) = (std::ptr::addr_of_mut!(PIN_DC), std::ptr::addr_of_mut!(PIN_BMP));
     if (*dc)[idx] == 0 {
         let mut bmi: BITMAPINFO = std::mem::zeroed();
@@ -463,9 +473,14 @@ unsafe fn pin_dc(hdc: isize, idx: usize) -> isize {
     (*dc)[idx]
 }
 
-/// 行尾画置顶图钉（cx, cy = 图标中心；dark = 当前是否暗色主题）
-unsafe fn draw_pin(hdc: isize, cx: i32, cy: i32, dark: bool) {
-    let src = pin_dc(hdc, dark as usize);
+/// 行尾画置顶图钉（cx, cy = 图标中心；t = 当前主题，取对应强调色的烘焙份）
+unsafe fn draw_pin(hdc: isize, cx: i32, cy: i32, t: theme::Theme) {
+    let idx = match t {
+        theme::Theme::Dark => 1,
+        theme::Theme::Yellow => 2,
+        _ => 0,
+    };
+    let src = pin_dc(hdc, idx);
     if src == 0 {
         return;
     }

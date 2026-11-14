@@ -20,7 +20,7 @@ use windows_sys::Win32::UI::Controls::{
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL,
-    VK_DELETE, VK_ESCAPE, VK_RETURN,
+    VK_DELETE, VK_ESCAPE, VK_LBUTTON, VK_RETURN,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow,
@@ -1613,7 +1613,9 @@ fn drag_drop_index(lv: HWND, from: i32, x: i32, y: i32, pin_boundary: usize) -> 
     } else {
         to.clamp(pb, i32::MAX)
     };
-    if to == from || to == from + 1 {
+    // to 是 remove 后的插入索引：只有 to == from 是原位（自己行下半/
+    // 下一行上半都折叠回 from）；to == from + 1 是真实的向下移一格
+    if to == from {
         return None; // 原位放下
     }
     Some(to as usize)
@@ -1761,6 +1763,28 @@ unsafe extern "system" fn child_subclass(
             WM_MOUSEMOVE => {
                 with_app(|app| {
                     if id == SUB_NOTE_LIST {
+                        // 左键物理未按下 → 现存的拖拽候选/激活态必是抬起消息丢失后
+                        // 的残留（释放时捕获已不在列表上，WM_LBUTTONUP 到不了列表）。
+                        // 不清理的话，纯悬停移动超阈值就会激活"幽灵拖拽"：插入线
+                        // 随悬停画线、随行界漂移残留。GetKeyState 与本线程消息队列
+                        // 同步，正是判断"随这条 move 按钮是否仍按下"的正确入口
+                        if unsafe { GetKeyState(VK_LBUTTON as i32) as i16 } >= 0 {
+                            if let Some(d) = app.note_drag.take() {
+                                // 已激活且画过线：抹掉旧线残留
+                                if d.active && d.line >= 0 {
+                                    let mut crc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                                    unsafe { GetClientRect(hwnd, &mut crc) };
+                                    unsafe {
+                                        InvalidateRect(
+                                            hwnd,
+                                            &RECT { left: 0, top: d.line - 2, right: crc.right, bottom: d.line + 2 },
+                                            1,
+                                        )
+                                    };
+                                }
+                            }
+                            return;
+                        }
                         // 边界值先取：d 可变借用 note_drag 字段期间不能整体借用 app
                         let pb = notes::pinned_count(app);
                         if let Some(d) = &mut app.note_drag {

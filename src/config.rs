@@ -8,7 +8,7 @@ pub struct Config {
     pub hotkey_vk: u32,
     pub auto_hide: bool,
     pub autostart: bool,
-    pub theme: String, // "light" / "dark" / "system"
+    pub theme: String, // "light" / "dark" / "yellow" / "system"
     pub win_x: i32,
     pub win_y: i32,
     pub win_cx: i32,
