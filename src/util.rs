@@ -123,13 +123,26 @@ pub fn exe_path() -> String {
     }
 }
 
-/// 数据目录：exe 旁 data/（便携式）
+/// 数据目录定位（双模式，见 README「下载」）：
+/// 便携模式——exe 旁已有 data/ 目录（老用户数据在原处）或 portable 标记
+/// 文件（想用便携但还没数据的用户，空文件即可），数据随 exe 目录走，
+/// 拷走目录即完成备份；否则（裸 exe 首次运行，比如直接在下载目录双击）
+/// 回退 %APPDATA%\MiniNotes\data，避免中间文件散落在 exe 所在文件夹。
 pub fn data_dir() -> PathBuf {
     let exe = std::path::Path::new(&exe_path())
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
     let dir = exe.join("data");
+    if dir.is_dir() || exe.join("portable").exists() {
+        let _ = std::fs::create_dir_all(&dir);
+        return dir;
+    }
+    // 极端环境读不到 APPDATA 时退回 exe 旁（与旧版行为一致）
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or(exe);
+    let dir = base.join("MiniNotes").join("data");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
