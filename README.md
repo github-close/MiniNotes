@@ -9,7 +9,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.97%2B-FFC53D?logo=rust&logoColor=000)](https://www.rust-lang.org)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-FFC53D?logo=windows&logoColor=000)](#)
-[![exe](https://img.shields.io/badge/single%20exe-~220KB-FFC53D)](#)
+[![exe](https://img.shields.io/badge/single%20exe-~315KB-FFC53D)](#)
 [![Memory](https://img.shields.io/badge/RAM-~4MB-FFC53D)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -26,7 +26,7 @@
 - 📝 **笔记页**：Markdown 纯文本笔记，600ms 防抖自动保存，重命名 / 新建 / 删除，右键「置顶」固定重要笔记（行尾图钉标识，置顶组内仍可拖拽排序）
 - 🎨 **三档主题**：浅色 / 暗色 / 跟随系统，无边框自绘窗口；暗色下列表、滚动条、光标、右键/托盘菜单全套跟随
 - ✏️ **编辑器字体可换**：设置里可为笔记输入区单独选字体族与字号（枚举全部系统字体，暗色下拉全跟随），标题栏 / 列表 / 待办页等其他界面字体不受影响
-- 🧳 **完全便携**：单 exe（约 220KB），数据在 `data/` 下（`notes/*.md`、`notes.order`、`notes.pinned`、`todos.json`、`config.ini`），无数据库、无 WebView、无外部 DLL；解压即用，不写注册表（开机自启仅写 `HKCU\...\Run` 一条）
+- 🧳 **完全便携**：单 exe（约 315KB），数据在 `data/` 下（`notes/*.md`、`notes.order`、`notes.pinned`、`todos.json`、`config.ini`），无数据库、无 WebView、无外部 DLL；解压即用，不写注册表（开机自启仅写 `HKCU\...\Run` 一条）
 - ⚙️ **可调**：热键捕获修改、开机自启（注册表 `HKCU\...\Run`）、失败自动降级备选热键并气泡提示
 - 🔁 **单实例（整机唯一）**：同一 exe 重复启动自动聚焦已有窗口；检测到其他目录的副本在运行时会弹窗拒绝并给出路径，避免热键与数据混乱
 
