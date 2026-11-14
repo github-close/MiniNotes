@@ -12,25 +12,28 @@ mod tray;
 mod util;
 mod window;
 
-use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::CreateMutexW;
+use windows_sys::Win32::System::Threading::{
+    CreateMutexW, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, FindWindowW, GetMessageW, LoadIconW, MSG, SendMessageW, TranslateMessage,
-    IDI_APPLICATION,
+    DispatchMessageW, EnumWindows, GetClassNameW, GetMessageW, GetWindowThreadProcessId, LoadIconW,
+    MSG, SendMessageW, TranslateMessage, IDI_APPLICATION,
 };
 
 use crate::util::wide;
 
-const MUTEX_NAME: &str = "MiniNotes_SingleInstance_v1";
-
 fn main() {
     
     unsafe {
-        // 单实例：已有实例则唤起它并退出
-        let _mutex = CreateMutexW(std::ptr::null(), 0, wide(MUTEX_NAME).as_ptr());
+        // 单实例（按 exe 路径限定）：同一 exe 重复启动 → 唤起已有窗口并退出；
+        // 不同目录的副本各自独立运行。互斥体全局命名会让"下载新版点开只看到
+        // 旧实例窗口"（v0.1.0 发布实测踩到），故名字带 exe 路径哈希
+        let _mutex = CreateMutexW(std::ptr::null(), 0, wide(&mutex_name()).as_ptr());
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            if let Some(h) = find_main_window() {
+            if let Some(h) = find_own_window() {
                 SendMessageW(h, window::MSG_SHOW, 0, 0);
             }
             return;
@@ -100,9 +103,53 @@ fn main() {
     }
 }
 
-fn find_main_window() -> Option<HWND> {
+/// 互斥体名 = exe 路径（小写化）的 FNV-1a 哈希
+fn mutex_name() -> String {
+    let path = util::exe_path().to_lowercase();
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in path.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("MiniNotes_SI_{h:016X}")
+}
+
+/// 命中结果暂存（EnumWindows 回调与调用同线程，写入后即读，无并发）
+static mut FOUND_HWND: isize = 0;
+
+/// 唤醒已有的本副本实例：按窗口类枚举顶层窗口，再匹配窗口所属进程的
+/// exe 路径——FindWindowW 只认类名，多实例并存时会唤醒到别的目录副本
+unsafe extern "system" fn enum_main(hwnd: HWND, _lp: LPARAM) -> i32 {
+    let mut cls = [0u16; 64];
+    GetClassNameW(hwnd, cls.as_mut_ptr(), 64);
+    if util::from_wide(&cls) != window::MAIN_CLASS {
+        return 1;
+    }
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, &mut pid);
+    if pid == 0 {
+        return 1;
+    }
+    let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+    if proc == 0 {
+        return 1;
+    }
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    let ok = QueryFullProcessImageNameW(proc, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len);
+    CloseHandle(proc);
+    if ok != 0 && util::from_wide(&buf[..len as usize]).eq_ignore_ascii_case(&util::exe_path()) {
+        std::ptr::addr_of_mut!(FOUND_HWND).write(hwnd);
+        return 0;
+    }
+    1
+}
+
+fn find_own_window() -> Option<HWND> {
     unsafe {
-        let h = FindWindowW(wide(window::MAIN_CLASS).as_ptr(), std::ptr::null());
+        std::ptr::addr_of_mut!(FOUND_HWND).write(0);
+        EnumWindows(Some(enum_main), 0);
+        let h = std::ptr::addr_of!(FOUND_HWND).read();
         if h != 0 {
             Some(h)
         } else {
