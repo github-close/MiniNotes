@@ -1,6 +1,6 @@
 [package]
 name = "mininotes"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 description = "托盘常驻极简便签：待办 + 笔记"
 
