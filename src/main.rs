@@ -20,7 +20,8 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, EnumWindows, GetClassNameW, GetMessageW, GetWindowThreadProcessId, LoadIconW,
-    MSG, SendMessageW, TranslateMessage, IDI_APPLICATION,
+    MessageBoxW, MSG, SendMessageW, TranslateMessage, IDI_APPLICATION, MB_ICONWARNING,
+    MB_SETFOREGROUND, MB_TOPMOST,
 };
 
 use crate::util::wide;
@@ -28,14 +29,35 @@ use crate::util::wide;
 fn main() {
     
     unsafe {
-        // 单实例（按 exe 路径限定）：同一 exe 重复启动 → 唤起已有窗口并退出；
-        // 不同目录的副本各自独立运行。互斥体全局命名会让"下载新版点开只看到
-        // 旧实例窗口"（v0.1.0 发布实测踩到），故名字带 exe 路径哈希
+        // 单实例（整机唯一）：先枚举已有主窗口并按所属进程 exe 路径区分——
+        // 其他目录的副本在跑 → 弹窗拒绝并指路（并存会争夺全局热键、数据也
+        // 各自独立，见 README「下载」）；同一 exe 在跑 → 唤起已有窗口。
+        // 枚举竞态（两份同时启动）由随后的互斥体兜底
+        let me = util::exe_path();
+        let instances = all_instances();
+        let others: Vec<&(HWND, String)> =
+            instances.iter().filter(|(_, p)| !p.eq_ignore_ascii_case(&me)).collect();
+        if let Some((_, path)) = others.first() {
+            let msg = format!(
+                "检测到另一份 MiniNotes 正在运行：\n{}\n\n两份副本并存会争夺全局热键、数据也各自独立，不做并存。\n请先退出已运行的实例（托盘右键 → 退出），再运行本程序。",
+                path
+            );
+            MessageBoxW(
+                0,
+                wide(&msg).as_ptr(),
+                wide("MiniNotes").as_ptr(),
+                MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND,
+            );
+            return;
+        }
+        if let Some((h, _)) = instances.iter().find(|(_, p)| p.eq_ignore_ascii_case(&me)) {
+            SendMessageW(*h, window::MSG_SHOW, 0, 0);
+            return;
+        }
         let _mutex = CreateMutexW(std::ptr::null(), 0, wide(&mutex_name()).as_ptr());
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            if let Some(h) = find_own_window() {
-                SendMessageW(h, window::MSG_SHOW, 0, 0);
-            }
+            // 极端竞态：另一份同路径实例刚启动、窗口还没建出来（枚举没看到），
+            // 它很快会自行展示界面，这里直接退出即可
             return;
         }
 
@@ -103,7 +125,9 @@ fn main() {
     }
 }
 
-/// 互斥体名 = exe 路径（小写化）的 FNV-1a 哈希
+/// 互斥体名 = exe 路径（小写化）的 FNV-1a 哈希。主流程的枚举先于互斥体
+/// 完成"其他目录拒绝 / 同路径唤起"的判定，互斥体只兜两份同路径实例
+/// 同时启动、枚举都看不到对方窗口的竞态
 fn mutex_name() -> String {
     let path = util::exe_path().to_lowercase();
     let mut h: u64 = 0xcbf29ce484222325;
@@ -114,12 +138,12 @@ fn mutex_name() -> String {
     format!("MiniNotes_SI_{h:016X}")
 }
 
-/// 命中结果暂存（EnumWindows 回调与调用同线程，写入后即读，无并发）
-static mut FOUND_HWND: isize = 0;
+/// 枚举命中结果暂存（回调与调用同线程，写入后即取走，无并发）
+static mut FOUND: Vec<(isize, String)> = Vec::new();
 
-/// 唤醒已有的本副本实例：按窗口类枚举顶层窗口，再匹配窗口所属进程的
-/// exe 路径——FindWindowW 只认类名，多实例并存时会唤醒到别的目录副本
-unsafe extern "system" fn enum_main(hwnd: HWND, _lp: LPARAM) -> i32 {
+/// 枚举所有 MiniNotes 主窗口（含本进程），按窗口所属进程的 exe 路径区分
+/// 副本——FindWindowW 只认类名，无法区分不同目录的副本
+unsafe extern "system" fn enum_instance(hwnd: HWND, _lp: LPARAM) -> i32 {
     let mut cls = [0u16; 64];
     GetClassNameW(hwnd, cls.as_mut_ptr(), 64);
     if util::from_wide(&cls) != window::MAIN_CLASS {
@@ -138,23 +162,18 @@ unsafe extern "system" fn enum_main(hwnd: HWND, _lp: LPARAM) -> i32 {
     let mut len = buf.len() as u32;
     let ok = QueryFullProcessImageNameW(proc, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len);
     CloseHandle(proc);
-    if ok != 0 && util::from_wide(&buf[..len as usize]).eq_ignore_ascii_case(&util::exe_path()) {
-        std::ptr::addr_of_mut!(FOUND_HWND).write(hwnd);
-        return 0;
+    if ok != 0 {
+        (*std::ptr::addr_of_mut!(FOUND)).push((hwnd, util::from_wide(&buf[..len as usize])));
     }
     1
 }
 
-fn find_own_window() -> Option<HWND> {
+/// 当前机器上所有 MiniNotes 主窗口（含本进程）
+fn all_instances() -> Vec<(HWND, String)> {
     unsafe {
-        std::ptr::addr_of_mut!(FOUND_HWND).write(0);
-        EnumWindows(Some(enum_main), 0);
-        let h = std::ptr::addr_of!(FOUND_HWND).read();
-        if h != 0 {
-            Some(h)
-        } else {
-            None
-        }
+        std::ptr::addr_of_mut!(FOUND).write(Vec::new());
+        EnumWindows(Some(enum_instance), 0);
+        std::ptr::replace(std::ptr::addr_of_mut!(FOUND), Vec::new())
     }
 }
 
