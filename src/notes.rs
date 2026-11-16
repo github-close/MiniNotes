@@ -13,7 +13,7 @@ use windows_sys::Win32::UI::Controls::{
     LVM_INSERTITEMW, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVIS_SELECTED, LVNI_SELECTED,
     NMLVCUSTOMDRAW,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, SendMessageW, SetWindowTextW, MB_OKCANCEL, SB_TOP, WM_VSCROLL,
 };
@@ -512,6 +512,21 @@ unsafe fn draw_pin(hdc: isize, cx: i32, cy: i32, t: theme::Theme) {
 
 // ---------- 业务 ----------
 
+/// windows-sys 未导出：置/清 EDIT 只读态
+const EM_SETREADONLY: u32 = 0x00CF;
+
+/// 无笔记可编辑时把正文编辑框置只读：save_current 以 cur_note 为闸，
+/// cur_note = None 时任何路径都不落盘，不锁的话打字看起来像在写一篇
+/// 不存在的笔记，内容只活在控件缓冲里，退出即丢
+fn set_editor_readonly(app: &App, ro: bool) {
+    unsafe { SendMessageW(app.editor, EM_SETREADONLY, ro as usize, 0) };
+    // 上锁瞬间编辑框可能正持有焦点（删掉最后一篇后系统把焦点还给编辑框）：
+    // 挪到列表上，控件失焦即隐藏光标，不残留一个"可输入"的假象
+    if ro && unsafe { GetFocus() } == app.editor {
+        unsafe { SetFocus(app.note_list) };
+    }
+}
+
 /// 首次运行：目录为空时创建欢迎笔记
 pub fn ensure_first_run() {
     let d = dir();
@@ -601,6 +616,8 @@ pub fn refresh(app: &mut App) {
             app.cur_note = Some(sel);
         }
     }
+    // 列表空 = 没有可编辑的目标，锁编辑框（文字由 WM_CTLCOLORSTATIC 转次级色）
+    set_editor_readonly(app, app.notes.is_empty());
     app.suppress_notify = false;
 }
 
@@ -640,6 +657,7 @@ pub fn load_by_index(app: &mut App, idx: usize) {
     let text = text.replace("\r\n", "\n").replace('\n', "\r\n");
     app.suppress_notify = true;
     set_text(app.editor, &text);
+    set_editor_readonly(app, false); // 载入了笔记，解锁编辑
     app.suppress_notify = false;
     // 载入一篇笔记 = 全新查看：滚回顶部。SB_TOP 只滚动视图不动光标/选区，
     // 紧接着的打字仍落在原光标位置（EM_SCROLLCARET 会把视图带回光标处）

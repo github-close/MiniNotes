@@ -39,9 +39,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_PASTE,
     WM_NCHITTEST,
     WM_NOTIFY, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SIZE, WM_SYSKEYDOWN,
-    WM_TIMER, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
-    WS_VSCROLL, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME, WS_CLIPCHILDREN,
-    WM_VSCROLL, SB_TOP,
+    WM_TIMER, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, WS_CHILD, WS_TABSTOP,
+    WS_VISIBLE, WS_VSCROLL, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
+    WS_CLIPCHILDREN, GetWindowLongW, GWL_STYLE,
+    WM_VSCROLL, SB_TOP, WM_SETFOCUS,
 };
 
 use crate::config::Config;
@@ -1138,11 +1139,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_CTLCOLORSTATIC => {
             let hdc = wp as HDC;
+            let ctrl = lp as HWND;
             with_app(|app| unsafe {
                 SetBkMode(hdc, TRANSPARENT as i32);
-                SetTextColor(hdc, theme::palette(app.theme).text_sec);
-                windows_sys::Win32::Graphics::Gdi::SetBkColor(hdc, theme::palette(app.theme).window_bg);
-                app.brushes.window_bg
+                if ctrl == app.editor {
+                    // 只读态的正文编辑框（无笔记可编辑时）会改发本消息而非
+                    // WM_CTLCOLOREDIT：底色与常态一致，仅文字转次级色，
+                    // 让"当前不可写"看得出来
+                    SetTextColor(hdc, theme::palette(app.theme).text_sec);
+                    windows_sys::Win32::Graphics::Gdi::SetBkColor(hdc, theme::palette(app.theme).surface2);
+                    app.brushes.surface2
+                } else {
+                    SetTextColor(hdc, theme::palette(app.theme).text_sec);
+                    windows_sys::Win32::Graphics::Gdi::SetBkColor(hdc, theme::palette(app.theme).window_bg);
+                    app.brushes.window_bg
+                }
             })
         }
         WM_SETTINGCHANGE => {
@@ -1676,6 +1687,15 @@ unsafe extern "system" fn child_subclass(
             return 1;
         }
         return DefSubclassProc(hwnd, msg, wp, lp);
+    }
+    // 只读态的正文编辑框（列表空、无笔记可写）不接管焦点：不把 WM_SETFOCUS
+    // 传给控件，控件自认无焦点，点击时不会画光标（caret）——READONLY 的
+    // EDIT 点进去仍会显示光标，看着像能输入，与"无笔记"的暗示矛盾
+    if id == SUB_EDITOR && msg == WM_SETFOCUS {
+        let ro = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } & ES_READONLY != 0;
+        if ro {
+            return 0;
+        }
     }
     // 笔记列表的暗色补丁（内联重命名编辑框挂在列表下，消息由列表收到）：
     // WM_ERASEBKGND：擦除用窗口底色，避免主题底色与自绘底色在滚动时闪色差
