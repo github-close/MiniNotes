@@ -17,6 +17,9 @@ param(
 $ErrorActionPreference = "Stop"
 $repo = $PSScriptRoot
 Set-Location $repo
+# 原生命令输出（git log 的中文提交说明）在 PS 5.1 默认按控制台 OEM 编码（GBK）
+# 解码，捕获进发布说明草稿会整体乱码——显式声明按 UTF-8 解码 git 的输出
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ExePath = Join-Path $repo "target\release\mininotes.exe"
 
 function Step($n, $msg) { Write-Host ("[{0}] {1}" -f $n, $msg) -ForegroundColor Cyan }
@@ -132,13 +135,13 @@ $payloadFile = Join-Path $env:TEMP "release-$newVer-payload.json"
 $code = curl.exe -s -o "$env:TEMP\release-resp.json" -w "%{http_code}" -X POST `
     -H "Authorization: token $token" -H "Accept: application/vnd.github+json" `
     -d "@$payloadFile" "https://api.github.com/repos/github-close/MiniNotes/releases"
-if ($code -ne "201") { Get-Content "$env:TEMP\release-resp.json"; Die "创建 Release 失败：HTTP $code" }
-$rid = (Get-Content "$env:TEMP\release-resp.json" -Raw | ConvertFrom-Json).id
+if ($code -ne "201") { Get-Content "$env:TEMP\release-resp.json" -Encoding UTF8; Die "创建 Release 失败：HTTP $code" }
+$rid = (Get-Content "$env:TEMP\release-resp.json" -Encoding UTF8 -Raw | ConvertFrom-Json).id
 
 $code = curl.exe -s -o "$env:TEMP\asset-resp.json" -w "%{http_code}" -X POST `
     -H "Authorization: token $token" -H "Content-Type: application/zip" `
     --data-binary "@$zip" "https://uploads.github.com/repos/github-close/MiniNotes/releases/$rid/assets?name=mininotes-$newVer-x64.zip"
-if ($code -ne "201") { Get-Content "$env:TEMP\asset-resp.json"; Die "上传附件失败：HTTP $code" }
+if ($code -ne "201") { Get-Content "$env:TEMP\asset-resp.json" -Encoding UTF8; Die "上传附件失败：HTTP $code" }
 
 Remove-Item $stage, $zip, $payloadFile, "$env:TEMP\release-resp.json", "$env:TEMP\asset-resp.json" -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ""
