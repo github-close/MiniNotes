@@ -225,6 +225,11 @@ fn lv_set_text(lv: HWND, idx: i32, text: &str) {
 }
 
 fn lv_select(lv: HWND, idx: i32) {
+    // 先清空全部再选目标行：列表未挂 LVS_SINGLESEL 时 SETITEMSTATE 对新行
+    // 是"追加"选中，不清旧会留下两行同时高亮（刷新后补选新笔记的场景）
+    let mut clear: LVITEMW = unsafe { std::mem::zeroed() };
+    clear.stateMask = LVIS_SELECTED; // state = 0 → 去选中；wParam = -1 作用于全部项
+    unsafe { SendMessageW(lv, LVM_SETITEMSTATE, (-1isize) as usize, &mut clear as *mut _ as LPARAM) };
     let mut item: LVITEMW = unsafe { std::mem::zeroed() };
     item.stateMask = LVIS_SELECTED;
     item.state = LVIS_SELECTED;
@@ -623,6 +628,12 @@ pub fn load_by_index(app: &mut App, idx: usize) {
     }
     save_current(app);
     app.cur_note = Some(idx);
+    // 高亮必须跟内容一起切：refresh 的 keep 解析优先 cur_note（仍是切换前
+    // 的旧笔记），新建/置顶这类 refresh 后紧跟 load 的路径，列表高亮会留在
+    // 旧笔记上——内容与高亮分家，看着像在另一篇笔记里打字。这里按 idx 补选
+    app.suppress_notify = true;
+    lv_select(app.note_list, idx as i32);
+    app.suppress_notify = false;
     let path = dir().join(&app.notes[idx].filename);
     let text = std::fs::read_to_string(path).unwrap_or_default();
     // 文件是 LF；EDIT 控件只认 CRLF，否则换行丢失
@@ -733,7 +744,7 @@ pub fn delete_selected(app: &mut App) {
     };
     // 关键：把 cur_note 预定位到邻位笔记，refresh 的 keep 解析才能选中它。
     // 否则 keep 退回 cfg.last_note（= 被删笔记名），列表里找不到 → sel=0，
-    // 高亮和视口跳到最顶；而 load_by_index 不更新列表高亮，跳顶就定型了
+    // 选中先跳到最顶（视口跟着滚顶），再靠 load_by_index 的补选拉回来
     if let Some(n) = &next_name {
         app.cur_note = app.notes.iter().position(|m| m.filename == *n);
     }

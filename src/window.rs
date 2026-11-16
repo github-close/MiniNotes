@@ -13,6 +13,7 @@ use windows_sys::Win32::UI::Controls::{
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETTEXTCOLOR, LVM_SETTEXTBKCOLOR, LVM_ENSUREVISIBLE,
     ILC_COLOR32,
     LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_NOCOLUMNHEADER, LVS_REPORT, LVS_SHOWSELALWAYS,
+    LVS_SINGLESEL,
     LVIF_STATE, LVIS_SELECTED, LVSIL_SMALL, WM_MOUSELEAVE, DRAWITEMSTRUCT, NMHDR, ODS_SELECTED,
     NMLISTVIEW, NMLVCUSTOMDRAW,
     LVM_GETITEMRECT, LVM_HITTEST, LVHITTESTINFO,
@@ -414,8 +415,11 @@ pub fn init_app(hwnd: HWND, cfg: Config, hicon: isize) {
             hwnd,
             "SysListView32",
             "",
+            // LVS_SINGLESEL：侧栏永远单选。多选下 SETITEMSTATE 是"追加"语义，
+            // 程序化补选会留旧高亮（两行同时亮），且 Ctrl+点选会让
+            // delete/rename 这类"按第一个选中项"操作的语义变含糊
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS
-                | LVS_NOCOLUMNHEADER,
+                | LVS_NOCOLUMNHEADER | LVS_SINGLESEL,
             0,
             ID_NOTE_LIST,
         );
